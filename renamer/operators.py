@@ -17,11 +17,28 @@ from ..utils.bone_utils import (
 
 
 class _RenamerBase:
-    """Mixin providing the standard poll for renamer operators."""
+    """Mixin providing the standard poll for renamer operators.
+
+    Buttons are kept active whenever an armature is the active object and
+    we are in EDIT or POSE mode. Selection is intentionally NOT checked
+    here so the user gets a clear in-context warning ("nothing selected")
+    via ``execute()`` instead of a silently-disabled button.
+    """
 
     @classmethod
     def poll(cls, context):
-        return is_armature_active(context) and len(get_selected_bone_names(context)) > 0
+        if not is_armature_active(context):
+            return False
+        return context.active_object.mode in {'EDIT', 'POSE'}
+
+
+def _require_selection(op, context) -> list[str] | None:
+    """Return selected bone names or report a warning and yield None."""
+    names = get_selected_bone_names(context)
+    if not names:
+        op.report({'WARNING'}, "No bones selected")
+        return None
+    return names
 
 
 def _report_result(op, count: int, action: str) -> set:
@@ -45,7 +62,9 @@ class HB_OT_renamer_rename(_RenamerBase, Operator):
             self.report({'WARNING'}, "New name is empty")
             return {'CANCELLED'}
 
-        names = get_selected_bone_names(context)
+        names = _require_selection(self, context)
+        if names is None:
+            return {'CANCELLED'}
         if len(names) == 1:
             name_map = {names[0]: base}
         else:
@@ -68,7 +87,10 @@ class HB_OT_renamer_add_prefix(_RenamerBase, Operator):
         if not prefix:
             self.report({'WARNING'}, "Prefix is empty")
             return {'CANCELLED'}
-        name_map = {n: f"{prefix}{n}" for n in get_selected_bone_names(context)}
+        names = _require_selection(self, context)
+        if names is None:
+            return {'CANCELLED'}
+        name_map = {n: f"{prefix}{n}" for n in names}
         return _report_result(self, rename_bones(context, name_map), "Add Prefix")
 
 
@@ -83,7 +105,10 @@ class HB_OT_renamer_add_suffix(_RenamerBase, Operator):
         if not suffix:
             self.report({'WARNING'}, "Suffix is empty")
             return {'CANCELLED'}
-        name_map = {n: f"{n}{suffix}" for n in get_selected_bone_names(context)}
+        names = _require_selection(self, context)
+        if names is None:
+            return {'CANCELLED'}
+        name_map = {n: f"{n}{suffix}" for n in names}
         return _report_result(self, rename_bones(context, name_map), "Add Suffix")
 
 
@@ -98,11 +123,10 @@ class HB_OT_renamer_remove_prefix(_RenamerBase, Operator):
         if not prefix:
             self.report({'WARNING'}, "Prefix is empty")
             return {'CANCELLED'}
-        name_map = {
-            n: n[len(prefix):]
-            for n in get_selected_bone_names(context)
-            if n.startswith(prefix)
-        }
+        names = _require_selection(self, context)
+        if names is None:
+            return {'CANCELLED'}
+        name_map = {n: n[len(prefix):] for n in names if n.startswith(prefix)}
         return _report_result(self, rename_bones(context, name_map), "Remove Prefix")
 
 
@@ -117,11 +141,10 @@ class HB_OT_renamer_remove_suffix(_RenamerBase, Operator):
         if not suffix:
             self.report({'WARNING'}, "Suffix is empty")
             return {'CANCELLED'}
-        name_map = {
-            n: n[: -len(suffix)]
-            for n in get_selected_bone_names(context)
-            if n.endswith(suffix)
-        }
+        names = _require_selection(self, context)
+        if names is None:
+            return {'CANCELLED'}
+        name_map = {n: n[: -len(suffix)] for n in names if n.endswith(suffix)}
         return _report_result(self, rename_bones(context, name_map), "Remove Suffix")
 
 
@@ -137,11 +160,14 @@ class HB_OT_renamer_search_replace(_RenamerBase, Operator):
         if not search:
             self.report({'WARNING'}, "Search text is empty")
             return {'CANCELLED'}
+        names = _require_selection(self, context)
+        if names is None:
+            return {'CANCELLED'}
 
         flags = 0 if props.case_sensitive else re.IGNORECASE
         pattern = re.compile(re.escape(search), flags)
         name_map = {}
-        for old in get_selected_bone_names(context):
+        for old in names:
             new = pattern.sub(props.replace_text, old)
             if new != old:
                 name_map[old] = new
