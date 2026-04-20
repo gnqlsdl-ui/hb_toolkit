@@ -3,10 +3,11 @@
 All features needing access to selected bones MUST use these helpers
 instead of duplicating mode-checking logic.
 
-Both EDIT and POSE modes are first-class supported:
-- EDIT mode operates on ``armature.edit_bones`` (EditBone collection).
-- POSE mode operates on ``armature.bones`` (Bone collection); selection
-  state is read from ``object.pose.bones[*].bone.select``.
+Both EDIT and POSE modes are first-class supported. Selection is read
+through Blender's context members (``selected_editable_bones`` and
+``selected_pose_bones``) so this module is robust against Blender 5.0's
+removal of the ``Bone.select`` attribute (replaced by the new Armature
+Collections system).
 """
 
 import uuid
@@ -41,6 +42,10 @@ def get_selected_bone_names(context) -> list[str]:
 
     Works in EDIT and POSE modes. Returns an empty list if no armature
     is active or nothing is selected.
+
+    Uses Blender context members (``selected_editable_bones`` /
+    ``selected_pose_bones``) instead of touching ``Bone.select``, which
+    was removed in Blender 5.0.
     """
     obj = context.active_object
     if obj is None or obj.type != 'ARMATURE':
@@ -48,10 +53,12 @@ def get_selected_bone_names(context) -> list[str]:
 
     mode = obj.mode
     if mode == 'EDIT':
-        return [b.name for b in obj.data.edit_bones if b.select]
+        bones = getattr(context, "selected_editable_bones", None) or []
+        return [b.name for b in bones]
     if mode == 'POSE':
-        return [b.name for b in obj.pose.bones if b.bone.select]
-    return [b.name for b in obj.data.bones if b.select]
+        bones = getattr(context, "selected_pose_bones", None) or []
+        return [b.name for b in bones]
+    return []
 
 
 def _rename_two_pass(bones, pending: dict[str, str]) -> int:
