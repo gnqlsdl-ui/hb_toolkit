@@ -54,33 +54,8 @@ def get_selected_bone_names(context) -> list[str]:
     return [b.name for b in obj.data.bones if b.select]
 
 
-def rename_bones(context, name_map: dict[str, str]) -> int:
-    """Rename bones safely using ``name_map`` ({old_name: new_name}).
-
-    Uses a **two-pass** strategy so that arbitrary rename plans (including
-    swaps like ``A->B, B->A`` and chained moves) succeed without Blender
-    auto-suffixing names due to transient collisions:
-
-    1. Pass 1: every source bone is renamed to a unique temporary name.
-    2. Pass 2: each temporary bone is renamed to its final target name.
-
-    Works identically in EDIT and POSE modes (no mode switching needed).
-    Returns the number of bones whose final name was applied.
-    """
-    obj = context.active_object
-    if obj is None or obj.type != 'ARMATURE':
-        return 0
-
-    bones = _get_bones_collection(obj)
-
-    pending = {
-        old: new
-        for old, new in name_map.items()
-        if new and old != new and bones.get(old) is not None
-    }
-    if not pending:
-        return 0
-
+def _rename_two_pass(bones, pending: dict[str, str]) -> int:
+    """Apply ``pending`` ({old: new}) using a two-pass swap-proof rename."""
     tmp_to_final: dict[str, str] = {}
     for old, new in pending.items():
         bone = bones.get(old)
@@ -98,3 +73,44 @@ def rename_bones(context, name_map: dict[str, str]) -> int:
         bone.name = new
         count += 1
     return count
+
+
+def rename_bones(context, name_map: dict[str, str]) -> int:
+    """Rename bones safely using ``name_map`` ({old_name: new_name}).
+
+    Uses a **two-pass** strategy so that arbitrary rename plans (including
+    swaps like ``A->B, B->A`` and chained moves) succeed without Blender
+    auto-suffixing names due to transient collisions:
+
+    1. Pass 1: every source bone is renamed to a unique temporary name.
+    2. Pass 2: each temporary bone is renamed to its final target name.
+
+    POSE mode handling: some Blender environments do not flush
+    ``data.bones[*].name`` writes immediately while in POSE mode. To
+    guarantee correctness we temporarily switch to EDIT mode, perform
+    the rename on ``edit_bones``, then restore POSE mode. Selection is
+    preserved by Blender across mode switches.
+
+    Returns the number of bones whose final name was applied.
+    """
+    obj = context.active_object
+    if obj is None or obj.type != 'ARMATURE':
+        return 0
+
+    prev_mode = obj.mode
+    must_switch = (prev_mode == 'POSE')
+    if must_switch:
+        bpy.ops.object.mode_set(mode='EDIT')
+    try:
+        bones = _get_bones_collection(obj)
+        pending = {
+            old: new
+            for old, new in name_map.items()
+            if new and old != new and bones.get(old) is not None
+        }
+        if not pending:
+            return 0
+        return _rename_two_pass(bones, pending)
+    finally:
+        if must_switch:
+            bpy.ops.object.mode_set(mode=prev_mode)
