@@ -2,15 +2,38 @@
 
 All features needing access to selected bones MUST use these helpers
 instead of duplicating mode-checking logic.
+
+Both EDIT and POSE modes are first-class supported:
+- EDIT mode operates on ``armature.edit_bones`` (EditBone collection).
+- POSE mode operates on ``armature.bones`` (Bone collection); selection
+  state is read from ``object.pose.bones[*].bone.select``.
 """
 
+import uuid
+
 import bpy
+
+# Prefix used by the 2-pass rename algorithm. Anything starting with this
+# string MUST be considered a transient name and never persisted.
+_TMP_PREFIX = "__hb_tmp_"
 
 
 def is_armature_active(context) -> bool:
     """Return True if the active object is an armature."""
     obj = context.active_object
     return obj is not None and obj.type == 'ARMATURE'
+
+
+def _get_bones_collection(obj):
+    """Return the writable bone collection for the object's current mode.
+
+    EDIT mode -> ``edit_bones``; POSE/OBJECT modes -> ``data.bones``.
+    Both collections expose a writable ``.name`` per bone, so renaming
+    works in either mode without an explicit mode switch.
+    """
+    if obj.mode == 'EDIT':
+        return obj.data.edit_bones
+    return obj.data.bones
 
 
 def get_selected_bone_names(context) -> list[str]:
@@ -32,27 +55,46 @@ def get_selected_bone_names(context) -> list[str]:
 
 
 def rename_bones(context, name_map: dict[str, str]) -> int:
-    """Rename bones using ``name_map`` ({old_name: new_name}).
+    """Rename bones safely using ``name_map`` ({old_name: new_name}).
 
-    Returns the number of bones successfully renamed. Skips entries
-    where the new name is empty or unchanged.
+    Uses a **two-pass** strategy so that arbitrary rename plans (including
+    swaps like ``A->B, B->A`` and chained moves) succeed without Blender
+    auto-suffixing names due to transient collisions:
+
+    1. Pass 1: every source bone is renamed to a unique temporary name.
+    2. Pass 2: each temporary bone is renamed to its final target name.
+
+    Works identically in EDIT and POSE modes (no mode switching needed).
+    Returns the number of bones whose final name was applied.
     """
     obj = context.active_object
     if obj is None or obj.type != 'ARMATURE':
         return 0
 
-    count = 0
-    if obj.mode == 'EDIT':
-        bones = obj.data.edit_bones
-    else:
-        bones = obj.data.bones
+    bones = _get_bones_collection(obj)
 
-    for old_name, new_name in name_map.items():
-        if not new_name or old_name == new_name:
-            continue
-        bone = bones.get(old_name)
+    pending = {
+        old: new
+        for old, new in name_map.items()
+        if new and old != new and bones.get(old) is not None
+    }
+    if not pending:
+        return 0
+
+    tmp_to_final: dict[str, str] = {}
+    for old, new in pending.items():
+        bone = bones.get(old)
         if bone is None:
             continue
-        bone.name = new_name
+        tmp = f"{_TMP_PREFIX}{uuid.uuid4().hex[:12]}"
+        bone.name = tmp
+        tmp_to_final[tmp] = new
+
+    count = 0
+    for tmp, new in tmp_to_final.items():
+        bone = bones.get(tmp)
+        if bone is None:
+            continue
+        bone.name = new
         count += 1
     return count
