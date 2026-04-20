@@ -1,0 +1,25 @@
+schema_version = "1.0.0"
+
+# Identity
+id = "hb_toolkit"
+version = "1.0.0"
+name = "HB Toolkit"
+tagline = "Rigging toolkit collection for Blender 5+"
+maintainer = "HB"
+
+# Extension type: "add-on" or "theme"
+type = "add-on"
+
+# Minimum Blender version required
+blender_version_min = "5.0.0"
+
+# SPDX license identifier (Blender API is GPL, so add-ons must be GPL-compatible)
+license = [
+    "SPDX:GPL-3.0-or-later",
+]
+
+# Tags shown on the extensions website
+tags = ["Rigging"]
+
+# Optional website / documentation
+# website = "https://example.com/hb_toolkit"

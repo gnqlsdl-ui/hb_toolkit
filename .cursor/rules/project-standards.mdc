@@ -1,0 +1,103 @@
+---
+description: HB Toolkit (Blender 5+ 리깅 애드온) 프로젝트 개발 표준 규칙
+alwaysApply: true
+---
+
+# HB Toolkit 개발 규칙
+
+Blender 5+ 용 리깅 툴킷 애드온 프로젝트의 핵심 개발 규칙입니다.
+
+## 1. 코드 중복 금지 (DRY)
+
+- 동일/유사 로직은 반드시 공통 모듈, 유틸 함수, 또는 베이스 클래스로 추출한다.
+- 새 기능을 추가하기 전에 기존 코드에 재사용 가능한 함수/클래스가 있는지 먼저 확인한다.
+- 2회 이상 반복되는 패턴은 즉시 리팩터링 대상으로 분류한다.
+
+```python
+# BAD: 동일한 본 선택 로직이 여러 오퍼레이터에 중복
+# GOOD: utils/bone_utils.py 의 get_selected_bones() 로 통합
+from .utils.bone_utils import get_selected_bones
+```
+
+## 2. 계획 → 검토 → 보고 워크플로
+
+코드 작성 전후로 반드시 사용자에게 보고한다.
+
+1. **작성 전**: 변경할 파일, 추가/수정할 함수, 영향 범위를 정리해 계획을 보고하고 승인을 받는다.
+2. **작성 후**: 변경 요약, 영향받은 파일 목록, 테스트/검증 결과를 보고한다.
+3. 단순한 1줄 수정이라도 결과 요약은 생략하지 않는다.
+
+## 3. 릴리즈 배포 규칙 (Blender Extension 형식)
+
+이 프로젝트는 **Blender Extension** 형식으로 배포한다 (Blender 4.2+ / 5+ 표준).
+
+- 모든 배포용 zip 파일은 프로젝트 루트의 `release/` 폴더에 생성한다.
+- zip 내부 최상위 폴더명은 패키지명(`hb_toolkit/`)과 일치해야 한다.
+- 패키지 루트에 **`blender_manifest.toml` 이 반드시 포함**되어야 한다 (Extension 의 메타데이터 단일 출처).
+- `bl_info` 는 사용하지 않는다 (Extension 은 무시함).
+- 모듈 임포트는 항상 **상대 임포트**(`from . import x`, `from ..utils import y`)를 사용한다. Extension 의 실제 모듈 경로는 `bl_ext.<repo>.<id>` 라서 절대 임포트는 깨진다.
+- `__pycache__`, `.git`, `.cursor`, `docs`, `release`, `build.*`, `README.md` 는 zip에서 제외한다.
+
+## 4. 기능별 폴더 분리 (모듈러 구조)
+
+이 애드온은 여러 기능을 모은 통합 툴킷이다. **각 기능은 독립된 폴더**로 분리한다.
+
+> **중요**: 프로젝트 루트 폴더(`hb_toolkit/`) 자체가 곧 애드온 패키지다. 루트 안에 또 `hb_toolkit/` 폴더를 만들지 말 것 (중복 금지).
+
+```
+hb_toolkit/                  # 프로젝트 루트 = Extension 패키지
+├── blender_manifest.toml    # Extension 메타데이터 (필수, 버전 단일 출처)
+├── __init__.py              # 전역 register/unregister
+├── utils/                   # 모든 기능이 공유하는 공통 유틸
+├── ui/                      # 메인 N-Panel 컨테이너
+├── renamer/                 # 기능 1: 본 이름 변경
+│   ├── __init__.py
+│   ├── properties.py
+│   ├── operators.py
+│   └── ui.py                # 이 기능의 패널 섹션 draw 함수
+├── <next_feature>/          # 새 기능 추가 시 동일 구조
+├── build.ps1 / build.py     # 릴리즈 빌드 스크립트 (zip 제외 대상)
+└── release/                 # 빌드 산출물 (zip 제외 대상)
+```
+
+- 각 기능 폴더는 `properties.py`, `operators.py`, `ui.py` 패턴을 따른다.
+- 기능 폴더의 `__init__.py` 는 자기 모듈의 register/unregister 만 담당한다.
+- 빌드 시 zip 내부의 최상위 폴더는 반드시 `hb_toolkit/` 이어야 Blender 가 인식한다.
+
+## 5. UI: 단일 N-Panel 카테고리 + 기능별 Panel
+
+- 모든 기능은 **동일한 N-Panel 카테고리** 아래에 배치된다.
+- 카테고리 이름은 `ui/__init__.py` 의 `CATEGORY = "hb_toolkit"` 상수로 통일한다 (DRY: 한 곳에서만 변경).
+- 각 기능은 **자기만의 `bpy.types.Panel` 클래스**를 가진다 (`bl_label = "<feature_name>"`). 사용자가 접고 펼 수 있는 독립 섹션이 된다.
+- 패널 클래스/등록은 해당 기능 폴더의 `ui.py` 가 책임진다. 메인 컨테이너 패널은 두지 않는다.
+- 패널 헤더 라벨은 기능 폴더명과 동일한 소문자로 통일한다 (예: `"renamer"`).
+
+```python
+# renamer/ui.py
+from ..ui import CATEGORY
+
+class HB_PT_renamer(bpy.types.Panel):
+    bl_label = "renamer"
+    bl_idname = "HB_PT_renamer"
+    bl_space_type = 'VIEW_3D'
+    bl_region_type = 'UI'
+    bl_category = CATEGORY  # "hb_toolkit"
+```
+
+## 6. 릴리즈 파일 버전 네이밍
+
+- 파일명 형식: `hb_toolkit_v{MAJOR}.{MINOR}.{PATCH}.zip`
+  - 예) `release/hb_toolkit_v1.0.0.zip`, `release/hb_toolkit_v1.2.3.zip`
+- 버전은 **`blender_manifest.toml` 의 `version`** 이 단일 출처다.
+- 빌드 스크립트(`build.ps1` / `build.py`)는 manifest 에서 버전을 읽어 zip 파일명을 생성한다.
+- 버전을 올릴 때는 manifest 만 수정하면 되고, 다른 곳을 동기화할 필요가 없다.
+
+```toml
+# blender_manifest.toml
+schema_version = "1.0.0"
+id = "hb_toolkit"
+version = "1.0.0"
+type = "add-on"
+blender_version_min = "5.0.0"
+license = ["SPDX:GPL-3.0-or-later"]
+```
