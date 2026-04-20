@@ -101,3 +101,20 @@ type = "add-on"
 blender_version_min = "5.0.0"
 license = ["SPDX:GPL-3.0-or-later"]
 ```
+
+## 7. Git 브랜치 전략
+
+| 브랜치 | 역할 |
+|--------|------|
+| `dev` | **개발 전용**. 모든 코드 작성·수정·리팩터링 커밋이 발생하는 작업 브랜치 |
+| `main` | **릴리즈 전용**. 빌드(`build.ps1`/`build.py`), 버전 태그, zip 배포만 수행 |
+
+- 평상시 작업 시작 전 반드시 `git switch dev` 로 전환되어 있는지 확인한다.
+- `main` 에는 직접 커밋하지 않는다. 릴리즈 시점에 `dev → main` 병합으로만 변경이 들어간다.
+- 릴리즈 절차 (전체 `main` 에서 수행):
+  1. `git switch main && git merge dev`
+  2. `blender_manifest.toml` 의 `version` 확인 (필요 시 dev 에서 미리 올려두기)
+  3. `powershell -ExecutionPolicy Bypass -File .\build.ps1`
+  4. `git tag v{MAJOR}.{MINOR}.{PATCH}` 후 푸시 (원격이 있는 경우)
+  5. 작업 재개 시 다시 `git switch dev`
+- 큰 기능 단위는 `dev` 에서 분기한 `feature/<name>` 브랜치를 만들고 작업 후 `dev` 로 머지하는 것을 권장한다.
