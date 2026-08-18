@@ -4,12 +4,14 @@ All feature panels MUST import ``CATEGORY`` from here so the N-Panel
 category name has a single source of truth (DRY).
 """
 
+from . import update as update_ui
+
 CATEGORY = "hb_toolkit"
 
 
 def register():
-    pass
+    update_ui.register()
 
 
 def unregister():
-    pass
+    update_ui.unregister()

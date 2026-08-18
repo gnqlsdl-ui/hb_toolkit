@@ -25,6 +25,43 @@ def is_armature_active(context) -> bool:
     return obj is not None and obj.type == 'ARMATURE'
 
 
+def get_active_armature(context):
+    """Return the active armature object, or None."""
+    obj = context.active_object
+    if obj is not None and obj.type == 'ARMATURE':
+        return obj
+    return None
+
+
+# Recognised side suffixes, longest first so ``.L`` is preferred over ``L``.
+_SIDE_SUFFIXES = (".L", ".R", "_L", "_R", "-L", "-R")
+_SIDE_FLIP = {"L": "R", "R": "L"}
+
+
+def split_side(name: str):
+    """Split a bone name into ``(base, suffix)`` where suffix is the side.
+
+    Returns ``(name, "")`` when no recognised side suffix is present.
+    """
+    for suf in _SIDE_SUFFIXES:
+        if name.endswith(suf):
+            return name[: -len(suf)], suf
+    return name, ""
+
+
+def flip_side(suffix: str) -> str:
+    """Flip a side suffix (e.g. ``.L`` -> ``.R``). Empty stays empty."""
+    if not suffix:
+        return ""
+    return suffix[:-1] + _SIDE_FLIP.get(suffix[-1], suffix[-1])
+
+
+def flip_side_name(name: str) -> str:
+    """Return ``name`` with its side suffix flipped (``.L`` <-> ``.R``)."""
+    base, suf = split_side(name)
+    return base + flip_side(suf)
+
+
 def _get_bones_collection(obj):
     """Return the writable bone collection for the object's current mode.
 

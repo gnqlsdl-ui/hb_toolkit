@@ -7,9 +7,10 @@ This module only wires up the per-feature register / unregister hooks.
 from . import ui
 from . import utils
 from . import renamer
+from . import roll
 
 
-_modules = (ui, utils, renamer)
+_modules = (ui, utils, renamer, roll)
 
 
 def register():

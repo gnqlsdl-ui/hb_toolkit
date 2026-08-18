@@ -30,7 +30,7 @@ $zipPath = Join-Path $ReleaseDir "${PackageName}_v${version}.zip"
 if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
 # Folders & files at project root that are NOT part of the extension package.
-$excludeDirs = @('__pycache__', '.git', '.cursor', 'release', 'docs', '.vscode', '.idea')
+$excludeDirs = @('__pycache__', '.git', '.cursor', 'release', 'docs', '.vscode', '.idea', 'reference', 'scripts', '.github')
 $excludeFiles = @('build.ps1', 'build.py', 'README.md', '.gitignore')
 $excludeSuffixes = @('.pyc', '.pyo', '.zip')
 
