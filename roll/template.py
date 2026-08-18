@@ -143,22 +143,23 @@ WGT_CIRCLE_VERTS = [
 ]
 WGT_CIRCLE_EDGES = [(i, (i + 1) % 32) for i in range(32)]
 
-# Double-headed rotation arc arrow (roll controls).
-WGT_ARROW_NAME = "WGT-Roll_Arrow"
+# Double-headed rotation arc (roll controls). Captured from the user's
+# retuned widget (XY plane, arrowheads at the open end).
+WGT_ARROW_NAME = "WGT-Roll_Arc"
 WGT_ARROW_VERTS = [
-    (-0.0, 2.0985, -0.429), (-0.098, 2.0985, -0.4242), (-0.1951, 2.0985, -0.4098),
-    (-0.2903, 2.0985, -0.386), (-0.3827, 2.0985, -0.3529), (-0.4714, 2.0985, -0.3109),
-    (-0.5556, 2.0985, -0.2605), (-0.6344, 2.0985, -0.202), (-0.7071, 2.0985, -0.1361),
-    (-0.773, 2.0985, -0.0634), (-0.8315, 2.0985, 0.0154), (-0.8819, 2.0985, 0.0996),
-    (-0.9239, 2.0985, 0.1883), (-0.9569, 2.0985, 0.2807), (-0.9808, 2.0985, 0.3759),
-    (-0.9952, 2.0985, 0.473), (-1.0, 2.0985, 0.571), (-1.1, 2.0985, 0.471),
-    (-0.9, 2.0985, 0.471), (1.1, 2.0985, 0.471), (0.9, 2.0985, 0.471),
-    (1.0, 2.0985, 0.571), (0.9952, 2.0985, 0.473), (0.9808, 2.0985, 0.3759),
-    (0.9569, 2.0985, 0.2807), (0.9239, 2.0985, 0.1883), (0.8819, 2.0985, 0.0996),
-    (0.8315, 2.0985, 0.0154), (0.773, 2.0985, -0.0634), (0.7071, 2.0985, -0.1361),
-    (0.6344, 2.0985, -0.202), (0.5556, 2.0985, -0.2605), (0.4714, 2.0985, -0.3109),
-    (0.3827, 2.0985, -0.3529), (0.2903, 2.0985, -0.386), (0.1951, 2.0985, -0.4098),
-    (0.098, 2.0985, -0.4242),
+    (0.0, 1.0, 0.0), (-0.098, 0.9952, 0.0), (-0.1951, 0.9808, 0.0),
+    (-0.2903, 0.9569, 0.0), (-0.3827, 0.9239, 0.0), (-0.4714, 0.8819, 0.0),
+    (-0.5556, 0.8315, 0.0), (-0.6344, 0.773, 0.0), (-0.7071, 0.7071, 0.0),
+    (-0.773, 0.6344, 0.0), (-0.8315, 0.5556, 0.0), (-0.8819, 0.4714, 0.0),
+    (-0.9239, 0.3827, 0.0), (-0.9569, 0.2903, 0.0), (-0.9808, 0.1951, 0.0),
+    (-0.9952, 0.098, 0.0), (-1.0, 0.0, 0.0), (-1.1, 0.1, 0.0),
+    (-0.9, 0.1, 0.0), (1.1, 0.1, 0.0), (0.9, 0.1, 0.0),
+    (1.0, 0.0, 0.0), (0.9952, 0.098, 0.0), (0.9808, 0.1951, 0.0),
+    (0.9569, 0.2903, 0.0), (0.9239, 0.3827, 0.0), (0.8819, 0.4714, 0.0),
+    (0.8315, 0.5556, 0.0), (0.773, 0.6344, 0.0), (0.7071, 0.7071, 0.0),
+    (0.6344, 0.773, 0.0), (0.5556, 0.8315, 0.0), (0.4714, 0.8819, 0.0),
+    (0.3827, 0.9239, 0.0), (0.2903, 0.9569, 0.0), (0.1951, 0.9808, 0.0),
+    (0.098, 0.9952, 0.0),
 ]
 WGT_ARROW_EDGES = [
     (16, 17), (16, 18), (20, 21), (0, 1), (1, 2), (2, 3), (3, 4), (4, 5),
@@ -166,6 +167,19 @@ WGT_ARROW_EDGES = [
     (13, 14), (14, 15), (15, 16), (19, 21), (21, 22), (22, 23), (23, 24),
     (24, 25), (25, 26), (26, 27), (27, 28), (28, 29), (29, 30), (30, 31),
     (31, 32), (32, 33), (33, 34), (34, 35), (35, 36), (0, 36),
+]
+
+# Square frame with tick marks (Root control). Captured from
+# WGT-Armature_Root-ForeArm.L.
+WGT_ROOT_NAME = "WGT-Root"
+WGT_ROOT_VERTS = [
+    (1.0, 0.0, 1.0), (-1.0, 0.0, 1.0), (1.0, 0.0, -1.0), (-1.0, 0.0, -1.0),
+    (0.6667, 0.0, -1.0), (-0.6667, 0.0, -1.0), (0.6667, 0.0, 1.0),
+    (-0.6667, 0.0, 1.0), (1.0, 0.0, 0.6667), (1.0, 0.0, -0.6667),
+    (-1.0, 0.0, 0.6667), (-1.0, 0.0, -0.6667),
+]
+WGT_ROOT_EDGES = [
+    (3, 5), (1, 7), (2, 9), (3, 11), (2, 4), (0, 6), (0, 8), (1, 10),
 ]
 
 # Curved twist arrow (the Twist control). Lies in the X/Z plane, two
@@ -217,14 +231,14 @@ CSTF_TARGETS = {
     "roll_in": "System-{seg}_Roll_In{side}",
 }
 
-# Widget application presets. Scale/translation/cstf captured from the .L rig
-# (Hand segment values used as the canonical template; scale * size).
+# Widget application presets. Scale/translation/cstf captured from the
+# retuned .L rig (ForeArm values are the canonical template; scale * size).
 # ``bone_size`` -> use_custom_shape_bone_size: the FK circle uses an absolute
 # size (False); the roll/twist arrows scale with the bone length (True).
 # ``cstf`` -> CSTF_TARGETS key for the custom_shape_transform bone.
 WGT_CIRCLE = {
     "mesh": WGT_CIRCLE_NAME,
-    "scale": (80.038, 80.038, 80.038),
+    "scale": (39.36, 39.36, 39.36),
     "translation": (0.0, 0.0, 0.0),
     "rotation": (0.0, 0.0, 0.0),
     "bone_size": False,
@@ -232,7 +246,7 @@ WGT_CIRCLE = {
 }
 WGT_TWIST = {
     "mesh": WGT_TWIST_NAME,
-    "scale": (3.162, 3.162, 3.162),
+    "scale": (1.555, 1.555, 1.555),
     "translation": (0.0, -0.038, 0.0),
     "rotation": (0.0, 0.0, 0.0),
     "bone_size": True,
@@ -240,19 +254,27 @@ WGT_TWIST = {
 }
 WGT_ARROW_UP = {
     "mesh": WGT_ARROW_NAME,
-    "scale": (1.0, 1.0, 1.0),
-    "translation": (-0.35, 0.331, -0.277),
-    "rotation": (math.pi / 2.0, 0.0, math.pi / 2.0),
+    "scale": (1.146, 1.146, 1.146),
+    "translation": (0.183, 0.337, 0.0),
+    "rotation": (0.0, 0.0, -math.pi / 2.0),
     "bone_size": True,
     "cstf": "roll_in",
 }
 WGT_ARROW_DOWN = {
     "mesh": WGT_ARROW_NAME,
     "scale": (1.0, 1.0, 1.0),
-    "translation": (0.35, 0.331, 0.11),
-    "rotation": (-math.pi / 2.0, 0.0, math.pi / 2.0),
+    "translation": (-0.183, 0.337, 0.0),
+    "rotation": (0.0, 0.0, math.pi / 2.0),
     "bone_size": True,
     "cstf": "roll_in",
+}
+WGT_ROOT = {
+    "mesh": WGT_ROOT_NAME,
+    "scale": (6.782, 6.782, 6.782),
+    "translation": (0.0, 0.0, 0.0),
+    "rotation": (0.0, 0.0, 0.0),
+    "bone_size": True,
+    "cstf": None,
 }
 
 # Bone display colors (CUSTOM palette: normal, select, active), captured from
@@ -352,7 +374,7 @@ def generated_bones(is_root):
         {
             "name": root_name, "anchor": ANCHOR_JOINT, "dir": DIR_SEG,
             "length": 0.034, "parent": root_parent, "coll": "root",
-            "widget": None, "constraints": [], "deform": True,
+            "widget": WGT_ROOT, "constraints": [], "deform": True,
         },
         # ---- Ctrl ----
         {

@@ -178,14 +178,52 @@ def find_guide_bones(arm, seg, side):
     return found
 
 
+def _is_main_guide(bone):
+    """True only for the segment's main ``Guide-{seg}`` (not Roll_* helpers)."""
+    if bone.get(ROLE_PROP) == T.ROLE_MAIN:
+        return True
+    parsed = parse_guide_name(bone.name)
+    if not parsed:
+        return False
+    return bone.name == T.GUIDE_MAIN.format(seg=parsed[0], side=parsed[1])
+
+
+def _nearby_parent_main(arm, child_main, seg, side):
+    """Return another main guide whose tail sits at ``child_main``'s head.
+
+    Used when the user placed a child Guide- at a parent Guide-'s tail but
+    did not (or could not) parent them. Ignores Roll_* guides.
+    """
+    if child_main is None:
+        return None
+    child_head = child_main.head
+    best = None
+    best_dist = None
+    for b in arm.data.edit_bones:
+        if b == child_main or not _is_main_guide(b):
+            continue
+        parsed = parse_guide_name(b.name)
+        if not parsed or parsed[0] == seg or parsed[1] != side:
+            continue
+        dist = (child_head - b.tail).length
+        thresh = max(0.001, (b.tail - b.head).length * 0.02)
+        if dist <= thresh and (best_dist is None or dist < best_dist):
+            best = b
+            best_dist = dist
+    return best
+
+
 def parent_segment_from_guides(arm, seg, side):
     """Walk up the guide's parent chain to find a parent guide segment.
 
     Returns the parent segment name (same side) or None for a root segment.
+    Falls back to head-at-tail proximity between main guides so a child
+    still chains onto the parent DEF when Place Roll Guides had previously
+    broken the Guide- parent link.
     """
     ebs = arm.data.edit_bones
-    # The limb chain is defined on the main guide (Guide-{seg}); the GRP_Guide
-    # root is typically left unparented, so walk the main guide first.
+    # The limb chain is defined on the main guide (Guide-{seg}); walk that
+    # first, then GRP_Guide if the main is parented under it.
     for start_name in (T.GUIDE_MAIN.format(seg=seg, side=side),
                        T.GUIDE_ROOT.format(seg=seg, side=side)):
         start = ebs.get(start_name)
@@ -197,7 +235,39 @@ def parent_segment_from_guides(arm, seg, side):
             if parsed and parsed[0] != seg and parsed[1] == side:
                 return parsed[0]
             p = p.parent
+    nearby = _nearby_parent_main(arm, find_main_guide(arm, seg, side), seg, side)
+    if nearby is not None:
+        parsed = parse_guide_name(nearby.name)
+        if parsed:
+            return parsed[0]
     return None
+
+
+def _build_order(targets, parent_seg):
+    """Parents before children so chained Roots can find existing DEF bones."""
+    target_set = set(targets)
+    remaining = list(targets)
+    ordered = []
+    seen = set()
+    while remaining:
+        ready = []
+        waiting = []
+        for item in remaining:
+            pseg = parent_seg.get(item)
+            parent_key = (pseg, item[1]) if pseg else None
+            if (parent_key is None
+                    or parent_key not in target_set
+                    or parent_key in seen):
+                ready.append(item)
+            else:
+                waiting.append(item)
+        if not ready:
+            ordered.extend(waiting)
+            break
+        ordered.extend(ready)
+        seen.update(ready)
+        remaining = waiting
+    return ordered
 
 
 def _guide_identity(bone):
@@ -232,10 +302,15 @@ def _ensure_wgts_collection(context):
 
 def _ensure_widget_mesh(context, name, verts, edges):
     obj = bpy.data.objects.get(name)
+    coords = [Vector(v) for v in verts]
     if obj is not None:
+        mesh = obj.data
+        mesh.clear_geometry()
+        mesh.from_pydata(coords, edges, [])
+        mesh.update()
         return obj
     mesh = bpy.data.meshes.new(name)
-    mesh.from_pydata([Vector(v) for v in verts], edges, [])
+    mesh.from_pydata(coords, edges, [])
     mesh.update()
     obj = bpy.data.objects.new(name, mesh)
     obj.hide_viewport = True
@@ -244,15 +319,17 @@ def _ensure_widget_mesh(context, name, verts, edges):
     return obj
 
 
+_WIDGET_MESHES = {
+    T.WGT_CIRCLE_NAME: (T.WGT_CIRCLE_VERTS, T.WGT_CIRCLE_EDGES),
+    T.WGT_TWIST_NAME: (T.WGT_TWIST_VERTS, T.WGT_TWIST_EDGES),
+    T.WGT_ARROW_NAME: (T.WGT_ARROW_VERTS, T.WGT_ARROW_EDGES),
+    T.WGT_ROOT_NAME: (T.WGT_ROOT_VERTS, T.WGT_ROOT_EDGES),
+}
+
+
 def _widget_object_for(context, widget):
-    if widget["mesh"] == T.WGT_CIRCLE_NAME:
-        return _ensure_widget_mesh(context, T.WGT_CIRCLE_NAME,
-                                   T.WGT_CIRCLE_VERTS, T.WGT_CIRCLE_EDGES)
-    if widget["mesh"] == T.WGT_TWIST_NAME:
-        return _ensure_widget_mesh(context, T.WGT_TWIST_NAME,
-                                   T.WGT_TWIST_VERTS, T.WGT_TWIST_EDGES)
-    return _ensure_widget_mesh(context, T.WGT_ARROW_NAME,
-                               T.WGT_ARROW_VERTS, T.WGT_ARROW_EDGES)
+    verts, edges = _WIDGET_MESHES[widget["mesh"]]
+    return _ensure_widget_mesh(context, widget["mesh"], verts, edges)
 
 
 def _ensure_bone_collection(arm, name):
@@ -283,8 +360,18 @@ def _remove_roll_guides(arm, seg, side):
     """Delete GRP_Guide and Roll_* guides, leaving the main Guide- bone."""
     ebs = arm.data.edit_bones
     main = find_main_guide(arm, seg, side)
+    grp = ebs.get(T.GUIDE_ROOT.format(seg=seg, side=side))
+    # Restore the limb chain that Place stored on GRP_Guide (e.g.
+    # Guide-Hand -> GRP_Guide-Hand -> Guide-ForeArm) so the main Guide-
+    # stays parented to the parent segment after GRP is removed.
+    restore = None
     if main is not None:
-        main.parent = None
+        if grp is not None and grp.parent is not None and grp.parent != main:
+            restore = grp.parent
+        elif main.parent is not None and main.parent != grp:
+            restore = main.parent
+        main.parent = restore
+        main.use_connect = False
     names = [tmpl.format(seg=seg, side=side) for tmpl in _ROLL_GUIDE_TEMPLATES]
     guides = find_guide_bones(arm, seg, side)
     if guides:
@@ -365,6 +452,11 @@ def place_roll_guides_on_main(arm, main, seg, side):
     if frame is None:
         return []
     joint, seg_dir, up, side_dir, length = frame
+    # Preserve exact head/tail before any reparenting. A connected main guide
+    # snaps its head to the parent tail when the parent changes unless connect
+    # is cleared first; restore after parenting to avoid drift.
+    saved_head = main.head.copy()
+    saved_tail = main.tail.copy()
     r = T.GUIDE_RATIOS
     nup = -up
     comp_name = main.get(COMPONENT_PROP, "")
@@ -403,11 +495,26 @@ def place_roll_guides_on_main(arm, main, seg, side):
         created.append(name)
 
     grp = bones[T.ROLE_ROOT]
-    grp.parent = None
+    old_parent = main.parent
+    # Re-Place: main already sits under this GRP. Keep GRP's existing parent
+    # (the parent-segment Guide-) instead of flattening the chain to world.
+    if old_parent is grp:
+        old_parent = grp.parent
+    if old_parent is None:
+        nearby = _nearby_parent_main(arm, main, seg, side)
+        if nearby is not None:
+            old_parent = nearby
+    grp.parent = old_parent
+    grp.use_connect = False
+    # Disconnect before reparenting so Blender does not snap the head to the
+    # new parent's tail (GRP tail sits offset along the segment axis).
+    main.use_connect = False
     for role in (T.ROLE_BACK, T.ROLE_FRONT, T.ROLE_IN, T.ROLE_OUT):
         bones[role].parent = grp
         bones[role].use_connect = False
     main.parent = grp
+    main.head = saved_head
+    main.tail = saved_tail
     main.use_connect = False
     created.append(main.name)
     return created
@@ -570,8 +677,8 @@ class HB_OT_roll_build(Operator):
             if find_guide_bones(arm, seg, side):
                 parent_seg[(seg, side)] = parent_segment_from_guides(arm, seg, side)
 
-        # Build roots first so chained children can find their parents.
-        order = sorted(targets, key=lambda x: parent_seg.get(x) is not None)
+        # Build parents before children so chained Roots can find DEF bones.
+        order = _build_order(targets, parent_seg)
 
         created_all = []
         skipped = []
@@ -583,8 +690,10 @@ class HB_OT_roll_build(Operator):
             pseg = parent_seg.get((seg, side))
             # Component label flows from the placed guides onto every bone the
             # build stamps out, so a built segment stays grouped/identifiable.
+            # GRP_Guide (role root) is optional after Clear Build.
+            root_g = guides.get("root")
             comp = (guides["main"].get(COMPONENT_PROP)
-                    or guides["root"].get(COMPONENT_PROP))
+                    or (root_g.get(COMPONENT_PROP) if root_g else None))
             created = self._build_segment_bones(arm, seg, side, guides, pseg, size)
             created_all.append((seg, side, pseg, created, comp))
 
@@ -824,6 +933,8 @@ class HB_OT_roll_build(Operator):
             if cstf_key:
                 cstf_name = T.CSTF_TARGETS[cstf_key].format(seg=seg, side=side)
                 pb.custom_shape_transform = arm.pose.bones.get(cstf_name)
+            else:
+                pb.custom_shape_transform = None
 
     # -- bone colors ---------------------------------------------------
     def _apply_colors(self, arm, seg, side, is_root):

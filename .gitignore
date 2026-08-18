@@ -20,6 +20,7 @@ release/*.zip
 /docs/
 /reference/
 /scripts/
+/_pages/
 
 # Blender
 *.blend1
