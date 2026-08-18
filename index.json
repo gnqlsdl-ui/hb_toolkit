@@ -1,0 +1,22 @@
+{
+  "version": "v1",
+  "blocklist": [],
+  "data": [
+    {
+      "schema_version": "1.0.0",
+      "id": "hb_toolkit",
+      "name": "HB Toolkit",
+      "tagline": "Rigging toolkit collection for Blender 5+",
+      "version": "1.2.0",
+      "type": "add-on",
+      "archive_size": 27420,
+      "archive_hash": "sha256:e4a03b93ad11dbe6d76e2f4d2fa25ad78bb0591e54b7ae7959b52c8c01efb0bf",
+      "archive_url": "https://github.com/gnqlsdl-ui/hb_toolkit/releases/download/v1.2.0/hb_toolkit_v1.2.0.zip",
+      "blender_version_min": "5.0.0",
+      "maintainer": "HB",
+      "tags": ["Rigging"],
+      "license": ["SPDX:GPL-3.0-or-later"],
+      "website": "https://github.com/gnqlsdl-ui/hb_toolkit"
+    }
+  ]
+}
