@@ -731,31 +731,19 @@ class HB_OT_roll_build(Operator):
         main = guides["main"]
         joint = main.head.copy()
         main_tail = main.tail.copy()
-        # Frame: the segment axis comes from the main guide (head -> tail), but
-        # the cross-section axes (up/side) are taken from where the roll guides
-        # actually sit, NOT from the main guide's roll. This makes the build
-        # match the placed cross-section in all three axes regardless of how the
-        # main guide happens to be rolled:
-        #   seg  = main head -> tail
-        #   up   = toward the Back guide   (Roll_Back/Front offset + roll plane)
-        #   side = toward the Out guide    (In -> Out axis)
+        # Frame comes from the main guide's own matrix so that built bones
+        # exactly match the guide's roll.  The roll guides only supply
+        # anchor *positions* (back, front, in, out); axes are the main
+        # guide's local Z (up) and local X (side).
         seg_vec = main_tail - joint
         seg_dir = seg_vec.normalized() if seg_vec.length > 1e-6 else Vector((0, 1, 0))
-
-        def _ortho(vec):
-            """Project ``vec`` perpendicular to the segment axis and normalize."""
-            v = vec - seg_dir * vec.dot(seg_dir)
-            return v.normalized() if v.length > 1e-6 else vec.normalized()
+        main_mat = main.matrix.to_3x3()
+        up = main_mat.col[2].normalized()
+        side_dir = main_mat.col[0].normalized()
 
         # Roll_Out guide head (falls back to the legacy In-guide tail).
         out_head = (guides["out"].head.copy() if "out" in guides
                     else guides["in"].tail.copy())
-
-        up = _ortho(guides["back"].head - joint)
-        if "out" in guides:
-            side_dir = _ortho(guides["out"].head - joint)
-        else:
-            side_dir = _ortho(joint - guides["in"].head)
 
         anchors = {
             T.ANCHOR_JOINT: joint,
