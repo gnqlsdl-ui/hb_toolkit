@@ -2,6 +2,8 @@
 
 Blender 5+ 용 리깅 통합 툴킷 (**Blender Extension** 형식).
 
+**사용 가이드:** [guide/README.md](guide/README.md)
+
 ## 구조
 
 프로젝트 루트(`hb_toolkit/`)가 곧 Extension 패키지입니다.
@@ -10,6 +12,7 @@ Blender 5+ 용 리깅 통합 툴킷 (**Blender Extension** 형식).
 hb_toolkit/                  # = Extension 패키지
 ├── blender_manifest.toml    # Extension 메타데이터 (버전 단일 출처)
 ├── __init__.py              # register/unregister
+├── guide/                   # 사용 문서 (Markdown)
 ├── utils/                   # 공통 유틸 (DRY)
 ├── ui/                      # N-Panel 카테고리 상수
 ├── renamer/                 # 본 이름 변경
@@ -31,6 +34,11 @@ hb_toolkit/                  # = Extension 패키지
 
 ### HB Component (Footbank)
 3D 커서에 메인 가이드를 만들고, 롤 가이드를 붙인 뒤 Build 합니다.
+
+→ [Footbank 가이드](guide/footbank-component.md)
+
+### Renamer
+→ [Renamer 가이드](guide/renamer.md)
 
 ## 설치 / 업데이트 (Blender)
 
