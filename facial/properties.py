@@ -1,7 +1,7 @@
 """Properties for the facial edge-bone / DSP generator (``scene.hb_facial``)."""
 
 import bpy
-from bpy.props import (EnumProperty, FloatProperty, IntProperty,
+from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
                        PointerProperty, StringProperty)
 from bpy.types import PropertyGroup
 
@@ -24,6 +24,13 @@ class HB_FacialProps(PropertyGroup):
         "run from the base of the head to the top: the base layout is scaled "
         "to its length",
         default="",
+    )
+
+    show_preview: BoolProperty(
+        name="Preview Lines",
+        description="Draw STR-FACE_UPP / STR-FACE_LOW as lines between their "
+        "markers in the viewport",
+        default=True,
     )
 
     count_mode: EnumProperty(

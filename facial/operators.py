@@ -2,9 +2,12 @@
 
 Workflow (one box per step in the Facial tab):
 
-0. Build Base      Head bone -> FACE-ROOT, STR/MSTR/TGT-FACE_UPP/LOW,
+0. Add Markers     Empties marking the root and tip of STR-FACE_UPP and
+                   STR-FACE_LOW (drawn as preview lines by overlay.py).
+   Build Base      Head bone -> FACE-ROOT, STR/MSTR/TGT-FACE_UPP/LOW,
                    MCH_SKULL, DEF-JAW/MCH-JAW, MSTR-EYE.L/R, MSTR-MOUTH
-                   (rain facial rig layout scaled to the Head bone).
+                   (rain facial rig layout scaled to the Head bone; each
+                   squash group is then fitted to its markers if present).
 1. Register Edges  Edit Mode: select the lip loop / each eyelid loop and
                    register it into its slot (stored on the mesh object).
    Generate        Guides (corners, Upper, Lower, Pivot) from the loops,
@@ -177,6 +180,78 @@ def _check_mesh(props):
 # ----------------------------------------------------------------------
 # 0. Base
 # ----------------------------------------------------------------------
+def head_xform(head_matrix, head_length):
+    """Armature-space matrix mapping the rain layout onto the Head bone."""
+    a, b = Vector(T.REFERENCE[0]), Vector(T.REFERENCE[1])
+    m0 = Matrix.Translation(a) @ bpy.types.Bone.MatrixFromAxisRoll(b - a, 0.0).to_4x4()
+    return head_matrix @ Matrix.Scale(head_length / (b - a).length, 4) @ m0.inverted()
+
+
+def marker_positions(arm):
+    """{marker: armature-space position} for the marker empties that exist."""
+    inv = arm.matrix_world.inverted()
+    return {n: inv @ bpy.data.objects[n].matrix_world.translation
+            for n in T.MARKERS if n in bpy.data.objects}
+
+
+def _fit_group_to_markers(ebs, str_bone, a1, b1, members):
+    """Move/rotate/scale a bone group so ``str_bone`` runs from a1 to b1."""
+    a0, b0 = ebs[str_bone].head.copy(), ebs[str_bone].tail.copy()
+    d0, d1 = b0 - a0, b1 - a1
+    if d0.length < 1e-9 or d1.length < 1e-9:
+        return
+    rot = d0.rotation_difference(d1).to_matrix().to_4x4()
+    g = (Matrix.Translation(a1) @ rot
+         @ Matrix.Scale(d1.length / d0.length, 4) @ Matrix.Translation(-a0))
+    for n in members:
+        if n in ebs:
+            ebs[n].transform(g)
+
+
+class HB_OT_facial_add_markers(Operator):
+    """Add the marker empties that place STR-FACE_UPP / STR-FACE_LOW
+(root and tip of each). Existing markers are not moved"""
+
+    bl_idname = "hb.facial_add_markers"
+    bl_label = "Add Markers"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        arm = get_active_armature(context)
+        return arm is not None and bool(context.scene.hb_facial.head_bone)
+
+    def execute(self, context):
+        props = context.scene.hb_facial
+        arm = get_active_armature(context)
+        hb = arm.data.bones.get(props.head_bone)
+        if hb is None:
+            self.report({'ERROR'}, f"Head bone '{props.head_bone}' not found")
+            return {'CANCELLED'}
+        coll = bpy.data.collections.get(T.MARKER_COLL)
+        if coll is None:
+            coll = bpy.data.collections.new(T.MARKER_COLL)
+            context.scene.collection.children.link(coll)
+        xf = arm.matrix_world @ head_xform(hb.matrix_local, hb.length)
+        made = 0
+        for name, p in T.MARKERS.items():
+            if name in bpy.data.objects:
+                continue
+            e = bpy.data.objects.new(name, None)
+            e.empty_display_type = 'SPHERE'
+            e.empty_display_size = hb.length * 0.02
+            e.show_name = True
+            e.show_in_front = True
+            e[OBJ_PROP] = "MARKER"
+            e.location = xf @ Vector(p)
+            coll.objects.link(e)
+            made += 1
+        props.show_preview = True
+        self.report({'INFO'}, f"Added {made} markers in '{T.MARKER_COLL}' "
+                    "- move them, then Build Base")
+        return {'FINISHED'}
+
+
 class HB_OT_facial_build_base(Operator):
     """Build the base face bones (rain layout) under the Head bone.
 Re-running replaces only the base bones this tool made"""
@@ -203,6 +278,7 @@ Re-running replaces only the base bones this tool made"""
                         + ", ".join(clash[:5]))
             return {'CANCELLED'}
 
+        markers = marker_positions(arm)
         with _EditMode(context, arm) as ebs:
             # Removing a base bone unparents its children (generated MCH,
             # hand-made controls...). Remember them and re-attach below.
@@ -210,12 +286,8 @@ Re-running replaces only the base bones this tool made"""
                        if b.parent is not None and b.parent.name in old
                        and b.name not in old}
             _remove_bones(ebs, old)
-            ref = ebs.new("__hb_facial_ref")
-            ref.head, ref.tail, ref.roll = Vector(T.REFERENCE[0]), Vector(T.REFERENCE[1]), 0.0
-            m0, l0 = ref.matrix.copy(), ref.length
-            ebs.remove(ref)
             head = ebs[props.head_bone]
-            xform = head.matrix @ Matrix.Scale(head.length / l0, 4) @ m0.inverted()
+            xform = head_xform(head.matrix, head.length)
             for name, d in T.BASE_BONES.items():
                 b = ebs.new(name)
                 b.head, b.tail, b.roll = Vector(d["head"]), Vector(d["tail"]), 0.0
@@ -232,6 +304,12 @@ Re-running replaces only the base bones this tool made"""
             for child, par in orphans.items():
                 if child in ebs and par in ebs:
                     ebs[child].parent = ebs[par]
+            # Markers override the Head-based layout of each squash group.
+            fitted = []
+            for str_bone, root, tip, members in T.MARKER_GROUPS:
+                if root in markers and tip in markers:
+                    _fit_group_to_markers(ebs, str_bone, markers[root], markers[tip], members)
+                    fitted.append(str_bone)
 
         _tag(arm, T.BASE_BONES, 'BASE')
         for name, d in T.BASE_BONES.items():
@@ -246,8 +324,9 @@ Re-running replaces only the base bones this tool made"""
                     c.target, c.subtarget = arm, target
                     c.volume, c.keep_axis = 'VOLUME_XZX', 'SWING_Y'
                     c.rest_length = arm.data.bones[name].length
-        self.report({'INFO'}, f"Built {len(T.BASE_BONES)} base bones "
-                    f"(replaced {len(old)})")
+        msg = f"Built {len(T.BASE_BONES)} base bones (replaced {len(old)})"
+        msg += f"; from markers: {', '.join(fitted)}" if fitted else "; no markers, Head layout"
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
@@ -941,6 +1020,7 @@ class HB_OT_facial_dsp_forget(Operator):
 # Clear
 # ----------------------------------------------------------------------
 CLEAR_ITEMS = [
+    ('MARKER', "Markers", "Marker empties"),
     ('BASE', "Base", "Base face bones"),
     ('GUIDE', "Guides", "Guide bones, lip ribbon and HK- empties"),
     ('MCH', "MCH", "Generated MCH bones (and the DEF bones on them)"),
@@ -963,6 +1043,12 @@ class HB_OT_facial_clear(Operator):
 
     def execute(self, context):
         props = context.scene.hb_facial
+        if self.stage == 'MARKER':
+            _remove_objects({"MARKER"})
+            coll = bpy.data.collections.get(T.MARKER_COLL)
+            if coll is not None and not coll.all_objects:
+                bpy.data.collections.remove(coll)
+            return {'FINISHED'}
         arm = get_active_armature(context)
         names = set(_tagged(arm, self.stage))
         if self.stage == 'MCH':
@@ -988,6 +1074,7 @@ class HB_OT_facial_clear(Operator):
 
 
 _classes = (
+    HB_OT_facial_add_markers,
     HB_OT_facial_build_base,
     HB_OT_facial_register_edges,
     HB_OT_facial_clear_edges,

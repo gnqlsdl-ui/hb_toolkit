@@ -54,6 +54,23 @@ BASE_BONES = {
                        parent="FACE-ROOT", coll=COLL_CTRL),
 }
 
+# Marker empties that place the face squash lines before Build Base.
+# name -> rain position (world). Each pair is the STR bone's head -> tail.
+MARKER_COLL = "Facial_Markers"
+MARKERS = {
+    "MK-FaceUpp_Root": (0.0, -0.0393, 1.3901),
+    "MK-FaceUpp_Top": (0.0, -0.0393, 1.5741),
+    "MK-FaceLow_Root": (0.0, -0.0922, 1.4716),
+    "MK-FaceLow_Chin": (0.0, -0.0998, 1.3486),
+}
+# (STR bone, root marker, tip marker, bones moved with it)
+MARKER_GROUPS = (
+    ("STR-FACE_UPP", "MK-FaceUpp_Root", "MK-FaceUpp_Top",
+     ("STR-FACE_UPP", "TGT-FACE_UPP", "MSTR-FACE_UPP", "MSTR-EYE.L", "MSTR-EYE.R")),
+    ("STR-FACE_LOW", "MK-FaceLow_Root", "MK-FaceLow_Chin",
+     ("STR-FACE_LOW", "TGT-FACE_LOW", "MSTR-FACE_LOW", "P-FACE_LOW")),
+)
+
 # Parents used by the generated MCH bones (and their DSP bones).
 LIP_UPPER_PARENT = "MCH_SKULL"
 LIP_LOWER_PARENT = "MCH-JAW"

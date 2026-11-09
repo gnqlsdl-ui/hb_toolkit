@@ -42,6 +42,10 @@ class HB_PT_facial(Panel):
         if arm is not None:
             box.prop_search(props, "head_bone", arm.data, "bones")
         row = box.row(align=True)
+        row.operator("hb.facial_add_markers", icon='EMPTY_DATA')
+        _clear_button(row, 'MARKER')
+        box.prop(props, "show_preview")
+        row = box.row(align=True)
         row.operator("hb.facial_build_base", icon='CHECKMARK')
         _clear_button(row, 'BASE')
 
