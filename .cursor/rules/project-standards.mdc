@@ -74,7 +74,8 @@ hb_toolkit/                  # 프로젝트 루트 = Extension 패키지
 - 카테고리 맨 위에는 **탭 바**(`ui/tabs.py` 의 `HB_PT_tabs`)가 있고, 한 번에 선택된 탭의 기능 패널만 보인다.
   - 새 기능은 `ui/tabs.py` 의 `TABS` 에 `(id, label, icon)` 을 추가하고,
     패널에 `bl_order = 10` 과 `poll` 에서 `tab_is(context, '<ID>')` 를 둔다.
-  - 공용 버튼(업데이트 등)은 기능 패널이 아니라 `HB_PT_footer` 에 둔다.
+  - 공용 버튼(업데이트 등)은 기능 패널이 아니라 탭 바(`HB_PT_tabs`) 줄 끝의 아이콘 버튼으로 둔다.
+    별도 footer 패널은 쓰지 않는다 — Blender 는 화면에 저장된 패널 순서를 유지해서 `bl_order` 로 맨 아래에 고정되지 않는다.
 
 ```python
 # renamer/ui.py

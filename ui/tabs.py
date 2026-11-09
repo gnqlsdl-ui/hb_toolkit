@@ -2,7 +2,8 @@
 
 One N-Panel category holds every feature. A row of tab buttons at the top
 picks which feature's panel is shown; feature panels hide themselves with
-``poll`` via :func:`tab_is`. The update button lives in a footer panel.
+``poll`` via :func:`tab_is`. The update button is an icon at the end of
+the tab row.
 """
 
 import bpy
@@ -37,22 +38,9 @@ class HB_PT_tabs(Panel):
         row = self.layout.row(align=True)
         row.scale_y = 1.3
         row.prop(context.window_manager, "hb_tab", expand=True)
-
-
-class HB_PT_footer(Panel):
-    bl_label = "HB Toolkit Footer"
-    bl_idname = "HB_PT_footer"
-    bl_space_type = 'VIEW_3D'
-    bl_region_type = 'UI'
-    bl_category = CATEGORY
-    bl_options = {'HIDE_HEADER'}
-    bl_order = 1000
-
-    def draw(self, context):
-        self.layout.operator("hb.toolkit_update", icon='FILE_REFRESH')
-
-
-_classes = (HB_PT_tabs, HB_PT_footer)
+        # Shared button: "Check for Updates" as an icon at the end of the row.
+        row.separator()
+        row.operator("hb.toolkit_update", text="", icon='FILE_REFRESH')
 
 
 def register():
@@ -61,11 +49,9 @@ def register():
         items=[(i, label, "", icon, n) for n, (i, label, icon) in enumerate(TABS)],
         default=TABS[0][0],
     )
-    for cls in _classes:
-        bpy.utils.register_class(cls)
+    bpy.utils.register_class(HB_PT_tabs)
 
 
 def unregister():
-    for cls in reversed(_classes):
-        bpy.utils.unregister_class(cls)
+    bpy.utils.unregister_class(HB_PT_tabs)
     del bpy.types.WindowManager.hb_tab
