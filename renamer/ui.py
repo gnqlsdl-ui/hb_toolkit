@@ -8,7 +8,7 @@ category. Each feature owns its own Panel; they all share the same
 import bpy
 from bpy.types import Panel
 
-from ..ui import CATEGORY
+from ..ui import CATEGORY, tab_is
 from ..utils.bone_utils import is_armature_active
 
 
@@ -18,6 +18,11 @@ class HB_PT_renamer(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = CATEGORY
+    bl_order = 10
+
+    @classmethod
+    def poll(cls, context):
+        return tab_is(context, 'RENAMER')
 
     def draw(self, context):
         layout = self.layout

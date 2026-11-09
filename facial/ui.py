@@ -3,7 +3,7 @@
 import bpy
 from bpy.types import Panel
 
-from ..ui import CATEGORY
+from ..ui import CATEGORY, tab_is
 from ..utils.bone_utils import get_active_armature
 from .operators import DSP_KEY, dsp_map
 from .properties import GUIDE_SET_ITEMS
@@ -15,6 +15,11 @@ class HB_PT_facial(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = CATEGORY
+    bl_order = 10
+
+    @classmethod
+    def poll(cls, context):
+        return tab_is(context, 'FACIAL')
 
     def draw(self, context):
         layout = self.layout

@@ -6,7 +6,7 @@ Standalone Panel under the shared HB Toolkit N-Panel category.
 import bpy
 from bpy.types import Panel
 
-from ..ui import CATEGORY
+from ..ui import CATEGORY, tab_is
 from ..utils.bone_utils import is_armature_active, get_active_armature
 from .operators import (active_bone_item, COMPONENT_PROP, DEF_MAIN_PROP,
                         TYPE_PROP, ROLE_PROP)
@@ -19,6 +19,11 @@ class HB_PT_roll(Panel):
     bl_space_type = 'VIEW_3D'
     bl_region_type = 'UI'
     bl_category = CATEGORY
+    bl_order = 10
+
+    @classmethod
+    def poll(cls, context):
+        return tab_is(context, 'COMPONENT')
 
     def draw(self, context):
         layout = self.layout
@@ -79,9 +84,6 @@ class HB_PT_roll(Panel):
             if active.get(DEF_MAIN_PROP):
                 col.label(text="DEF main  |  type: "
                           + str(active.get(TYPE_PROP, "-")), icon='CHECKMARK')
-
-        box = layout.box()
-        box.operator("hb.toolkit_update", icon='FILE_REFRESH')
 
 
 _classes = (HB_PT_roll,)
