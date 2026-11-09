@@ -8,9 +8,10 @@ from . import ui
 from . import utils
 from . import renamer
 from . import roll
+from . import facial
 
 
-_modules = (ui, utils, renamer, roll)
+_modules = (ui, utils, renamer, roll, facial)
 
 
 def register():
