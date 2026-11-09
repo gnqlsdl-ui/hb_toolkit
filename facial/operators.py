@@ -1,50 +1,62 @@
-"""Operators for the facial edge-bone and DSP generator.
+"""Operators for the facial template generator.
 
-Edge bones
-    Each guide set (lips, eyelid .L/.R) is four guides on the mesh — two
-    corners, Upper and Lower — plus an optional Pivot. ``hb.facial_build``
-    walks the mesh edges corner -> Upper -> corner and corner -> Lower ->
-    corner and puts a DEF bone on each point (every vertex, or an even count).
-    With "MCH From Pivot" each DEF sits on the tail of an MCH bone that starts
-    at the pivot, like a hand-made lip setup.
+Workflow (one box per step in the Facial tab):
 
-DSP bones
-    A DSP bone sits on one mesh vertex (Copy Location to a one-vertex group)
-    and is used as a control's ``custom_shape_transform`` so the widget rides
-    the skin. Only the control -> vertex pairs are stored (on the mesh object,
-    ``obj["hb_dsp"]``); ``hb.facial_dsp_build`` creates the groups, bones and
-    constraints from them and can be re-run at any time.
+0. Build Base      Head bone -> FACE-ROOT, STR/MSTR/TGT-FACE_UPP/LOW,
+                   MCH_SKULL, DEF-JAW/MCH-JAW, MSTR-EYE.L/R, MSTR-MOUTH
+                   (rain facial rig layout scaled to the Head bone).
+1. Register Edges  Edit Mode: select the lip loop / each eyelid loop and
+                   register it into its slot (stored on the mesh object).
+   Generate        Guides (corners, Upper, Lower, Pivot) from the loops,
+                   refits MSTR-EYE / MSTR-MOUTH, and for the lips builds the
+                   Guide_Mesh-Lips ribbon with one HK- empty per point.
+2. Build MCH       MCH bones from each pivot to each point, with parents and
+                   constraints (lips: Stretch To the HK- empties, corners
+                   follow the jaw 50%).
+3. Build All       DEF bones on the MCH tails, plus DSP bones for every
+                   stored control -> vertex pair.
 
-Everything generated is tagged with a custom property so rebuilding removes
-only what the tool made. Bones made by hand are never touched.
+Everything generated is tagged (``hb_facial_gen`` on bones,
+``hb_facial_obj`` on objects) so each step can be re-run and only replaces
+what the tool made. Hand-made bones are never touched: a set whose names are
+already taken by untagged bones is skipped whole.
 """
 
 import bmesh
 import bpy
 from bpy.props import EnumProperty
 from bpy.types import Operator
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
-from ..utils.bone_utils import get_active_armature, split_side, flip_side
-from ..utils.mesh_path import MeshGraph, resample, centroid
-from .properties import GUIDE_SET_ITEMS
+from ..utils.bone_utils import get_active_armature, split_side
+from ..utils.mesh_path import MeshGraph, edge_loop, split_loop, resample, centroid
+from . import template as T
 
 
 ROLE_PROP = "hb_role"          # guide role: corner_a / corner_b / upp / low / pivot
-SET_PROP = "hb_facial_set"     # guide set id on guides
-GEN_PROP = "hb_facial_gen"     # set id on generated edge bones
+SET_PROP = "hb_facial_set"     # set id (LIPS / EYE_L / EYE_R) on generated bones
+GEN_PROP = "hb_facial_gen"     # stage on generated bones: BASE / GUIDE / MCH / DEF
+OBJ_PROP = "hb_facial_obj"     # tag on generated objects (ribbon, empties)
 DSP_PROP = "hb_facial_dsp"     # flag on generated DSP bones
+EDGE_KEY = "hb_facial_edges"   # mesh object property: {slot: [edge indices]}
 DSP_KEY = "hb_dsp"             # mesh object property: {control: vertex index}
 
 GUIDE_COLL = "Facial_Guide"
-DEF_COLL = "Facial_DEF"
-MCH_COLL = "Facial_MCH"
 DSP_COLL = "Facial_DSP"
-
 GUIDE_LEN = 0.004
 DSP_PREFIX = "DSP-"
+HOOK_PREFIX = "HK-"
+ZIP_PREFIX = "HK-Zip-"
+RIBBON_NAME = "Guide_Mesh-Lips"
+RIBBON_OFFSET = 0.001          # inner row of the ribbon, towards the pivot
 
 ROLES = ("corner_a", "corner_b", "upp", "low", "pivot")
+
+SLOT_ITEMS = [
+    ('LIPS', "Lips", "Lip loop (upper and lower line, both corners)"),
+    ('EYE_L', "Eye .L", "Left eyelid loop"),
+    ('EYE_R', "Eye .R", "Right eyelid loop"),
+]
 
 SETS = {
     'LIPS': dict(
@@ -56,7 +68,7 @@ SETS = {
     ),
 }
 for _side in (".L", ".R"):
-    SETS['LID' + _side.replace(".", "_")] = dict(
+    SETS['EYE' + _side.replace(".", "_")] = dict(
         base="Lid", center=False, side=_side,
         guides=dict(corner_a=f"Guide-Eyelid_In{_side}",
                     corner_b=f"Guide-Eyelid_Out{_side}",
@@ -68,7 +80,7 @@ for _side in (".L", ".R"):
 
 
 # ----------------------------------------------------------------------
-# Small helpers
+# Generic helpers
 # ----------------------------------------------------------------------
 def _bone_coll(arm, name):
     coll = arm.data.collections_all.get(name)
@@ -117,228 +129,27 @@ def _side_of(name):
     return split_side(name)[1]
 
 
-def _tagged(arm, prop, value=None):
-    return [b.name for b in arm.data.bones
-            if prop in b and (value is None or b[prop] == value)]
-
-
-# ----------------------------------------------------------------------
-# Edge-bone planning
-# ----------------------------------------------------------------------
-def _point_names_vertex_mode(spec, which, n_points, mid):
-    """One name per path point (corners included) for Every Vertex mode."""
-    base = spec["base"]
-    ca, cb = spec["corners"]
-    names = [None] * n_points
-    names[0], names[-1] = ca, cb
-    if spec["center"]:
-        names[mid] = f"{base}_{which}"
-        sa, sb = _side_of(ca), _side_of(cb)
-        for k, i in enumerate(range(mid - 1, 0, -1), 1):
-            names[i] = f"{base}_{which}{k}{sa}"
-        for k, i in enumerate(range(mid + 1, n_points - 1), 1):
-            names[i] = f"{base}_{which}{k}{sb}"
-    else:
-        for k, i in enumerate(range(1, n_points - 1), 1):
-            names[i] = f"{base}_{which}{k}{spec['side']}"
-    return names
-
-
-def _plan_line(spec, which, pts, mid, props):
-    """Return [(name, world_point)] for one edge line (upper or lower)."""
-    if props.count_mode == 'VERTEX':
-        names = _point_names_vertex_mode(spec, which, len(pts), mid)
-        return list(zip(names, pts))
-
-    base = spec["base"]
-    ca, cb = spec["corners"]
-    out = [(ca, pts[0]), (cb, pts[-1])]
-    if spec["center"]:
-        n = props.lip_count
-        out.append((f"{base}_{which}", pts[mid]))
-        for half, corner in ((pts[:mid + 1][::-1], ca), (pts[mid:], cb)):
-            side = _side_of(corner)
-            for k, p in enumerate(resample(half, n + 2)[1:-1], 1):
-                out.append((f"{base}_{which}{k}{side}", p))
-    else:
-        n = props.lid_count
-        for k, p in enumerate(resample(pts, n + 2)[1:-1], 1):
-            out.append((f"{base}_{which}{k}{spec['side']}", p))
+def _tagged(arm, value=None, set_id=None):
+    out = []
+    for b in arm.data.bones:
+        if GEN_PROP not in b:
+            continue
+        if value is not None and b[GEN_PROP] != value:
+            continue
+        if set_id is not None and b.get(SET_PROP) != set_id:
+            continue
+        out.append(b.name)
     return out
 
 
-def plan_set(arm, graph, set_id, props):
-    """Plan one guide set. Returns ``(points, pivot, report_lines)``.
-
-    ``points`` is a list of ``(name, world_point)`` with corners only once.
-    Raises ``KeyError`` when a required guide is missing.
-    """
-    spec = SETS[set_id]
-    g = spec["guides"]
-    missing = [g[r] for r in ("corner_a", "corner_b", "upp", "low")
-               if g[r] not in arm.data.bones]
-    if missing:
-        raise KeyError(", ".join(missing))
-    vi = {r: graph.nearest(_world(arm, g[r]))
-          for r in ("corner_a", "corner_b", "upp", "low")}
-    pivot = _world(arm, g["pivot"]) if g["pivot"] in arm.data.bones else None
-
-    points, seen, report = [], set(), []
-    for which in ("upp", "low"):
-        path, mid, on_bnd = graph.trace(vi["corner_a"], vi[which], vi["corner_b"])
-        pts = [graph.co[i] for i in path]
-        report.append(f"{set_id} {which}: {len(path)} verts on "
-                      f"{'boundary' if on_bnd else 'edge path'}")
-        for name, p in _plan_line(spec, which, pts, mid, props):
-            if name not in seen:
-                seen.add(name)
-                points.append((name, p.copy()))
-    return points, pivot, report
+def _tag(arm, names, stage, set_id=None):
+    for n in names:
+        b = arm.data.bones[n]
+        b[GEN_PROP] = stage
+        if set_id is not None:
+            b[SET_PROP] = set_id
 
 
-def _present_sets(arm):
-    return [sid for sid, spec in SETS.items()
-            if all(spec["guides"][r] in arm.data.bones
-                   for r in ("corner_a", "corner_b", "upp", "low"))]
-
-
-# ----------------------------------------------------------------------
-# Guides
-# ----------------------------------------------------------------------
-def _auto_lid_points(graph, side, cursor):
-    """Corner/upper/lower/pivot from the eye-hole rim nearest the cursor."""
-    sign = 1.0 if side == ".L" else -1.0
-    loops = []
-    for loop in graph.boundary_loops():
-        pts = [graph.co[i] for i in loop]
-        c = centroid(pts)
-        if c.x * sign > 0.0 and len(loop) >= 6:
-            loops.append(((c - cursor).length, pts, c))
-    if not loops:
-        return None
-    _d, pts, c = min(loops, key=lambda t: t[0])
-    inner = min(pts, key=lambda p: abs(p.x))
-    outer = max(pts, key=lambda p: abs(p.x))
-    radius = (outer - inner).length * 0.5
-    return dict(corner_a=inner, corner_b=outer,
-                upp=max(pts, key=lambda p: p.z),
-                low=min(pts, key=lambda p: p.z),
-                pivot=c + Vector((0.0, radius, 0.0)))
-
-
-def _cursor_guide_points(set_id, cursor):
-    if set_id == 'LIPS':
-        off = dict(corner_a=(0.025, 0, 0), corner_b=(-0.025, 0, 0),
-                   upp=(0, -0.003, 0.002), low=(0, -0.003, -0.002),
-                   pivot=(0, 0.08, 0.015))
-    else:
-        s = 1.0 if set_id.endswith("_L") else -1.0
-        off = dict(corner_a=(-0.012 * s, 0, 0), corner_b=(0.012 * s, 0, 0),
-                   upp=(0, 0, 0.006), low=(0, 0, -0.006),
-                   pivot=(0, 0.012, 0))
-    return {r: cursor + Vector(v) for r, v in off.items()}
-
-
-class HB_OT_facial_add_guides(Operator):
-    """Add the guide bones of a facial set. Existing guides are left as they are.
-Eyelid guides snap to the eye-hole rim nearest the 3D cursor when the mesh has one"""
-
-    bl_idname = "hb.facial_add_guides"
-    bl_label = "Add Guides"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    guide_set: EnumProperty(items=GUIDE_SET_ITEMS)
-
-    @classmethod
-    def poll(cls, context):
-        return get_active_armature(context) is not None
-
-    def execute(self, context):
-        props = context.scene.hb_facial
-        arm = get_active_armature(context)
-        spec = SETS[self.guide_set]
-        cursor = context.scene.cursor.location.copy()
-        pts = None
-        source = "3D cursor"
-        if self.guide_set != 'LIPS' and props.mesh:
-            pts = _auto_lid_points(MeshGraph(props.mesh), spec["side"], cursor)
-            if pts:
-                source = f"eye-hole rim on {props.mesh.name}"
-        if pts is None:
-            pts = _cursor_guide_points(self.guide_set, cursor)
-
-        inv = arm.matrix_world.inverted()
-        made, kept = [], []
-        with _EditMode(context, arm) as ebs:
-            parent = ebs.get(props.parent_bone) if props.parent_bone else None
-            for role in ROLES:
-                name = spec["guides"][role]
-                if name in ebs:
-                    kept.append(name)
-                    continue
-                b = ebs.new(name)
-                b.head = inv @ pts[role]
-                length = GUIDE_LEN * (3 if role == "pivot" else 1)
-                b.tail = b.head + Vector((0.0, 0.0, length))
-                b.roll = 0.0
-                b.use_deform = False
-                b.parent = parent
-                _set_only_coll(arm, b, GUIDE_COLL)
-                made.append((name, role))
-        for name, role in made:
-            arm.data.bones[name][ROLE_PROP] = role
-            arm.data.bones[name][SET_PROP] = self.guide_set
-        msg = f"Added {len(made)} guides from {source}"
-        if kept:
-            msg += f" ({len(kept)} already existed, not moved)"
-        self.report({'INFO'}, msg)
-        return {'FINISHED'}
-
-
-class HB_OT_facial_mirror_guides(Operator):
-    """Copy every .L facial guide to .R (mirrored on X). Existing .R guides are overwritten"""
-
-    bl_idname = "hb.facial_mirror_guides"
-    bl_label = "Mirror Guides .L -> .R"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return get_active_armature(context) is not None
-
-    def execute(self, context):
-        arm = get_active_armature(context)
-        sources = [b.name for b in arm.data.bones
-                   if SET_PROP in b and _side_of(b.name) == ".L"]
-        if not sources:
-            self.report({'WARNING'}, "No .L facial guides found")
-            return {'CANCELLED'}
-        done = []
-        with _EditMode(context, arm) as ebs:
-            for name in sources:
-                base, side = split_side(name)
-                dst_name = base + flip_side(side)
-                src = ebs[name]
-                dst = ebs.get(dst_name) or ebs.new(dst_name)
-                dst.head = Vector((-src.head.x, src.head.y, src.head.z))
-                dst.tail = Vector((-src.tail.x, src.tail.y, src.tail.z))
-                dst.roll = -src.roll
-                dst.use_deform = False
-                dst.parent = src.parent
-                _set_only_coll(arm, dst, GUIDE_COLL)
-                done.append((name, dst_name))
-        for src, dst in done:
-            sb, db = arm.data.bones[src], arm.data.bones[dst]
-            db[ROLE_PROP] = sb.get(ROLE_PROP, "")
-            set_id = sb.get(SET_PROP, "")
-            db[SET_PROP] = set_id[:-1] + "R" if set_id.endswith("_L") else set_id
-        self.report({'INFO'}, f"Mirrored {len(done)} guides")
-        return {'FINISHED'}
-
-
-# ----------------------------------------------------------------------
-# Edge bones
-# ----------------------------------------------------------------------
 def _remove_bones(ebs, names):
     for n in names:
         b = ebs.get(n)
@@ -346,90 +157,355 @@ def _remove_bones(ebs, names):
             ebs.remove(b)
 
 
-class HB_OT_facial_build(Operator):
-    """Build DEF (and MCH) bones along the mesh edges between each set's guides.
-Re-running replaces only the bones this tool made"""
+def _remove_objects(tag_values):
+    for obj in [o for o in bpy.data.objects if o.get(OBJ_PROP) in tag_values]:
+        data = obj.data
+        bpy.data.objects.remove(obj, do_unlink=True)
+        if data is not None and data.users == 0 and isinstance(data, bpy.types.Mesh):
+            bpy.data.meshes.remove(data)
 
-    bl_idname = "hb.facial_build"
-    bl_label = "Build Edge Bones"
+
+def _check_mesh(props):
+    mesh = props.mesh
+    if mesh is None:
+        return "Set the Mesh first"
+    if mesh.mode == 'EDIT':
+        return f"Leave Edit Mode on {mesh.name} first"
+    return None
+
+
+# ----------------------------------------------------------------------
+# 0. Base
+# ----------------------------------------------------------------------
+class HB_OT_facial_build_base(Operator):
+    """Build the base face bones (rain layout) under the Head bone.
+Re-running replaces only the base bones this tool made"""
+
+    bl_idname = "hb.facial_build_base"
+    bl_label = "Build Base"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
     def poll(cls, context):
-        return (get_active_armature(context) is not None
-                and context.scene.hb_facial.mesh is not None)
+        arm = get_active_armature(context)
+        return arm is not None and bool(context.scene.hb_facial.head_bone)
 
     def execute(self, context):
         props = context.scene.hb_facial
         arm = get_active_armature(context)
-        set_ids = _present_sets(arm)
-        if not set_ids:
-            self.report({'WARNING'}, "No complete guide set (corners + Upper + Lower)")
+        if props.head_bone not in arm.data.bones:
+            self.report({'ERROR'}, f"Head bone '{props.head_bone}' not found")
+            return {'CANCELLED'}
+        old = set(_tagged(arm, 'BASE'))
+        clash = [n for n in T.BASE_BONES if n in arm.data.bones and n not in old]
+        if clash:
+            self.report({'ERROR'}, "Hand-made bones already use base names: "
+                        + ", ".join(clash[:5]))
             return {'CANCELLED'}
 
-        graph = MeshGraph(props.mesh)
-        plans, lines = {}, []
-        for sid in set_ids:
-            try:
-                plans[sid] = plan_set(arm, graph, sid, props)
-                lines += plans[sid][2]
-            except (KeyError, ValueError) as err:
-                lines.append(f"{sid}: skipped ({err})")
-
-        inv = arm.matrix_world.inverted()
-        built, blocked = [], []
         with _EditMode(context, arm) as ebs:
-            old = [n for sid in plans for n in _tagged(arm, GEN_PROP, sid)]
+            # Removing a base bone unparents its children (generated MCH,
+            # hand-made controls...). Remember them and re-attach below.
+            orphans = {b.name: b.parent.name for b in ebs
+                       if b.parent is not None and b.parent.name in old
+                       and b.name not in old}
             _remove_bones(ebs, old)
-            parent = ebs.get(props.parent_bone) if props.parent_bone else None
-            for sid, (points, pivot, _r) in plans.items():
-                use_mch = props.make_mch and pivot is not None
-                # A set is built whole or not at all: never mix generated
-                # bones into a set that hand-made bones already occupy.
-                clash = [n for n, _p in points
-                         if "DEF-" + n in ebs or (use_mch and "MCH-" + n in ebs)]
-                if clash:
-                    blocked.append((sid, clash[0], len(clash)))
-                    continue
-                for name, p in points:
-                    def_name, mch_name = "DEF-" + name, "MCH-" + name
-                    head = inv @ p
-                    owner = parent
-                    if use_mch:
-                        m = ebs.new(mch_name)
-                        m.head = inv @ pivot
-                        m.tail = head
-                        m.parent = parent
-                        m.use_deform = False
-                        _set_only_coll(arm, m, MCH_COLL)
-                        built.append((mch_name, sid))
-                        owner = m
-                    d = ebs.new(def_name)
-                    d.head = head
-                    d.tail = head + Vector((0.0, 0.0, props.def_length))
-                    d.roll = 0.0
-                    d.parent = owner
-                    d.use_deform = True
-                    _set_only_coll(arm, d, DEF_COLL)
-                    built.append((def_name, sid))
-        for name, sid in built:
-            arm.data.bones[name][GEN_PROP] = sid
+            ref = ebs.new("__hb_facial_ref")
+            ref.head, ref.tail, ref.roll = Vector(T.REFERENCE[0]), Vector(T.REFERENCE[1]), 0.0
+            m0, l0 = ref.matrix.copy(), ref.length
+            ebs.remove(ref)
+            head = ebs[props.head_bone]
+            xform = head.matrix @ Matrix.Scale(head.length / l0, 4) @ m0.inverted()
+            for name, d in T.BASE_BONES.items():
+                b = ebs.new(name)
+                b.head, b.tail, b.roll = Vector(d["head"]), Vector(d["tail"]), 0.0
+                b.transform(xform)
+                b.use_deform = d.get("deform", False)
+                b.bbone_segments = d.get("bbone", 1)
+                _set_only_coll(arm, b, d["coll"])
+            for name, d in T.BASE_BONES.items():
+                par = d["parent"]
+                if par == "@HEAD":
+                    par = props.head_bone
+                ebs[name].parent = ebs[par] if par else None
+                ebs[name].use_connect = False
+            for child, par in orphans.items():
+                if child in ebs and par in ebs:
+                    ebs[child].parent = ebs[par]
 
-        for line in lines:
-            print("[hb facial]", line)
-        msg = f"Built {len(built)} bones (replaced {len(old)})"
-        for sid, first, count in blocked:
-            msg += (f"; {sid} skipped: {count} names already used by "
-                    f"hand-made bones (e.g. {first})")
-        self.report({'WARNING'} if blocked else {'INFO'}, msg)
+        _tag(arm, T.BASE_BONES, 'BASE')
+        for name, d in T.BASE_BONES.items():
+            pb = arm.pose.bones[name]
+            for kind, target in d.get("constraints", ()):
+                if kind == "ARMATURE":
+                    c = pb.constraints.new('ARMATURE')
+                    t = c.targets.new()
+                    t.target, t.subtarget, t.weight = arm, target, 1.0
+                elif kind == "STRETCH_TO":
+                    c = pb.constraints.new('STRETCH_TO')
+                    c.target, c.subtarget = arm, target
+                    c.volume, c.keep_axis = 'VOLUME_XZX', 'SWING_Y'
+                    c.rest_length = arm.data.bones[name].length
+        self.report({'INFO'}, f"Built {len(T.BASE_BONES)} base bones "
+                    f"(replaced {len(old)})")
         return {'FINISHED'}
 
 
-class HB_OT_facial_clear(Operator):
-    """Delete the edge bones this tool generated. Guides stay"""
+# ----------------------------------------------------------------------
+# 1. Edges -> guides, ribbon
+# ----------------------------------------------------------------------
+def edge_map(mesh_obj):
+    data = mesh_obj.get(EDGE_KEY) if mesh_obj else None
+    return {k: [int(i) for i in v] for k, v in data.items()} if data else {}
 
-    bl_idname = "hb.facial_clear"
-    bl_label = "Clear Edge Bones"
+
+class HB_OT_facial_register_edges(Operator):
+    """Register the selected edges (Edit Mode) as this slot's loop"""
+
+    bl_idname = "hb.facial_register_edges"
+    bl_label = "Register Edges"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    slot: EnumProperty(items=SLOT_ITEMS)
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj is not None and obj.type == 'MESH' and obj.mode == 'EDIT'
+
+    def execute(self, context):
+        obj = context.active_object
+        bm = bmesh.from_edit_mesh(obj.data)
+        sel = [e.index for e in bm.edges if e.select]
+        if not sel:
+            self.report({'WARNING'}, "Select the loop's edges first")
+            return {'CANCELLED'}
+        mapping = edge_map(obj)
+        mapping[self.slot] = sel
+        obj[EDGE_KEY] = mapping
+        props = context.scene.hb_facial
+        if props.mesh is None:
+            props.mesh = obj
+        self.report({'INFO'}, f"{self.slot}: {len(sel)} edges on {obj.name}")
+        return {'FINISHED'}
+
+
+class HB_OT_facial_clear_edges(Operator):
+    """Forget this slot's registered edges"""
+
+    bl_idname = "hb.facial_clear_edges"
+    bl_label = "Clear Edges"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    slot: EnumProperty(items=SLOT_ITEMS)
+
+    def execute(self, context):
+        mesh = context.scene.hb_facial.mesh
+        mapping = edge_map(mesh)
+        if mapping.pop(self.slot, None) is None:
+            return {'CANCELLED'}
+        mesh[EDGE_KEY] = mapping
+        return {'FINISHED'}
+
+
+def _upper_first(mesh, loop, arc1, arc2, co):
+    """Return ``(upper_arc, lower_arc)``.
+
+    Eye holes (boundary loops): the higher arc is the upper lid.
+    Closed lip lines are different: with the mouth shut the upper lip's
+    inner edge can sit *below* the lower lip's, so instead look at the mesh
+    next to each arc (two edge rings, not crossing the loop): the arc whose
+    neighborhood rises is the upper lip.
+    """
+    graph = MeshGraph(mesh)
+    inner1, inner2 = arc1[1:-1] or arc1, arc2[1:-1] or arc2
+    mean_z = lambda ids: sum(graph.co[i].z for i in ids) / len(ids)
+    if all(graph.boundary[i] for i in loop):
+        return (arc1, arc2) if mean_z(inner1) >= mean_z(inner2) else (arc2, arc1)
+    blocked = set(loop)
+
+    def rise(inner):
+        seen, front = set(inner), set(inner)
+        for _ in range(2):
+            front = {w for u in front for w, _b in graph.neighbors[u]
+                     if w not in seen and w not in blocked}
+            seen |= front
+        ring = [i for i in seen if i not in blocked]
+        return mean_z(ring) - mean_z(inner) if ring else 0.0
+
+    return (arc1, arc2) if rise(inner1) >= rise(inner2) else (arc2, arc1)
+
+
+def analyze_slot(arm, mesh, slot):
+    """Split a slot's registered loop into upper / lower arcs.
+
+    Corners, the upper arc and the centers follow the guide bones when they
+    exist, otherwise sensible defaults. Returns a dict with world positions.
+    """
+    spec = SETS[slot]
+    g = spec["guides"]
+    loop, closed = edge_loop(mesh, edge_map(mesh)[slot])
+    if not closed:
+        raise ValueError(f"{slot}: register a closed loop")
+    mw = mesh.matrix_world
+    co = {i: mw @ mesh.data.vertices[i].co for i in loop}
+
+    def guide(role):
+        return _world(arm, g[role]) if g[role] in arm.data.bones else None
+
+    def nearest(ids, p):
+        return min(ids, key=lambda i: (co[i] - p).length_squared)
+
+    if guide("corner_a") is not None and guide("corner_b") is not None:
+        ca, cb = nearest(loop, guide("corner_a")), nearest(loop, guide("corner_b"))
+    elif spec["center"]:
+        ca = max(loop, key=lambda i: co[i].x)
+        cb = min(loop, key=lambda i: co[i].x)
+    else:
+        ca = min(loop, key=lambda i: abs(co[i].x))
+        cb = max(loop, key=lambda i: abs(co[i].x))
+    if ca == cb:
+        raise ValueError(f"{slot}: both corners land on the same vertex")
+    arc1, arc2 = split_loop(loop, ca, cb)
+
+    up_guide = guide("upp")
+    if up_guide is not None:
+        dist = lambda arc: min((co[i] - up_guide).length for i in arc[1:-1] or arc)
+        upper, lower = (arc1, arc2) if dist(arc1) <= dist(arc2) else (arc2, arc1)
+    else:
+        upper, lower = _upper_first(mesh, loop, arc1, arc2, co)
+
+    def mid_of(arc, role, default_key):
+        inner = arc[1:-1] or arc
+        p = guide(role)
+        return nearest(inner, p) if p is not None else min(inner, key=default_key)
+
+    if spec["center"]:
+        upp_mid = mid_of(upper, "upp", lambda i: abs(co[i].x))
+        low_mid = mid_of(lower, "low", lambda i: abs(co[i].x))
+    else:
+        upp_mid = mid_of(upper, "upp", lambda i: -co[i].z)
+        low_mid = mid_of(lower, "low", lambda i: co[i].z)
+
+    loop_center = centroid([co[i] for i in loop])
+    width = (co[ca] - co[cb]).length
+    pivot = guide("pivot")
+    if pivot is None:
+        if slot == 'LIPS' and T.LIP_UPPER_PARENT in arm.data.bones:
+            pivot = _world(arm, T.LIP_UPPER_PARENT)
+        else:
+            pivot = loop_center + Vector((0.0, width * (1.0 if slot == 'LIPS' else 0.5), 0.0))
+
+    return dict(
+        spec=spec, co=co, upper=upper, lower=lower,
+        upp_mid=upper.index(upp_mid), low_mid=lower.index(low_mid),
+        guides=dict(corner_a=co[ca], corner_b=co[cb], upp=co[upp_mid],
+                    low=co[low_mid], pivot=pivot),
+    )
+
+
+def line_points(spec, which, pts, mid, props):
+    """Ordered [(name, point)] from corner_a to corner_b for one line."""
+    base = spec["base"]
+    ca, cb = spec["corners"]
+    if props.count_mode == 'VERTEX':
+        names = [None] * len(pts)
+        names[0], names[-1] = ca, cb
+        if spec["center"]:
+            names[mid] = f"{base}_{which}"
+            sa, sb = _side_of(ca), _side_of(cb)
+            for k, i in enumerate(range(mid - 1, 0, -1), 1):
+                names[i] = f"{base}_{which}{k}{sa}"
+            for k, i in enumerate(range(mid + 1, len(pts) - 1), 1):
+                names[i] = f"{base}_{which}{k}{sb}"
+        else:
+            for k, i in enumerate(range(1, len(pts) - 1), 1):
+                names[i] = f"{base}_{which}{k}{spec['side']}"
+        return list(zip(names, pts))
+
+    if not spec["center"]:
+        inner = resample(pts, props.lid_count + 2)[1:-1]
+        return ([(ca, pts[0])]
+                + [(f"{base}_{which}{k}{spec['side']}", p) for k, p in enumerate(inner, 1)]
+                + [(cb, pts[-1])])
+    n = props.lip_count
+    sa, sb = _side_of(ca), _side_of(cb)
+    half_a = resample(pts[:mid + 1][::-1], n + 2)[1:-1]   # center -> corner a
+    half_b = resample(pts[mid:], n + 2)[1:-1]             # center -> corner b
+    out = [(ca, pts[0])]
+    out += [(f"{base}_{which}{k}{sa}", p) for k, p in reversed(list(enumerate(half_a, 1)))]
+    out.append((f"{base}_{which}", pts[mid]))
+    out += [(f"{base}_{which}{k}{sb}", p) for k, p in enumerate(half_b, 1)]
+    out.append((cb, pts[-1]))
+    return out
+
+
+def slot_lines(arm, mesh, slot, props):
+    """(analysis, upper line, lower line); lines are [(name, point)]."""
+    info = analyze_slot(arm, mesh, slot)
+    co, spec = info["co"], info["spec"]
+    upp = line_points(spec, "upp", [co[i] for i in info["upper"]], info["upp_mid"], props)
+    low = line_points(spec, "low", [co[i] for i in info["lower"]], info["low_mid"], props)
+    return info, upp, low
+
+
+def _build_ribbon(context, arm, upp, low, pivot):
+    """Ribbon mesh along the lip lines + one vertex-parented HK- empty per point."""
+    _remove_objects({"LIPS_RIBBON", "LIPS_HOOK"})
+    order = list(upp) + [p for p in low[1:-1]]          # corners only once
+    index = {name: i for i, (name, _p) in enumerate(order)}
+    n = len(order)
+    verts = [p.copy() for _n, p in order]
+    for _n, p in order:
+        inward = (pivot - p)
+        inward = inward.normalized() * RIBBON_OFFSET if inward.length else Vector((0, RIBBON_OFFSET, 0))
+        verts.append(p + inward)
+    faces = []
+    for line in (upp, low):
+        names = [nm for nm, _p in line]
+        for a, b in zip(names, names[1:]):
+            ia, ib = index[a], index[b]
+            faces.append((ia, ib, ib + n, ia + n))
+
+    me = bpy.data.meshes.new(RIBBON_NAME)
+    me.from_pydata([tuple(v) for v in verts], [], faces)
+    me.update()
+    rib = bpy.data.objects.new(RIBBON_NAME, me)
+    rib[OBJ_PROP] = "LIPS_RIBBON"
+    coll = arm.users_collection[0] if arm.users_collection else context.scene.collection
+    coll.objects.link(rib)
+    rib.modifiers.new("Armature", 'ARMATURE').object = arm
+
+    # Zip groups: each point + the nearest point on the opposite line.
+    upp_names = {nm for nm, _p in upp}
+    for nm, p in order:
+        other = low if nm in upp_names else upp
+        group = [index[nm]]
+        if nm not in (upp[0][0], upp[-1][0]):
+            mate = min(other[1:-1] or other, key=lambda t: (t[1] - p).length_squared)[0]
+            group.append(index[mate])
+        rib.vertex_groups.new(name=ZIP_PREFIX + nm).add(group, 1.0, 'REPLACE')
+
+    for nm, _p in order:
+        e = bpy.data.objects.new(HOOK_PREFIX + nm, None)
+        e.empty_display_type = 'PLAIN_AXES'
+        e.empty_display_size = 0.002
+        e[OBJ_PROP] = "LIPS_HOOK"
+        coll.objects.link(e)
+        e.parent = rib
+        e.parent_type = 'VERTEX'
+        i = index[nm]
+        e.parent_vertices = (i, i, i)
+        e.location = (0.0, 0.0, 0.0)
+    return len(order)
+
+
+class HB_OT_facial_generate(Operator):
+    """Create the guides from the registered loops (existing guides are kept),
+refit MSTR-EYE / MSTR-MOUTH and build the lip ribbon with its HK- empties"""
+
+    bl_idname = "hb.facial_generate"
+    bl_label = "Generate Guides"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -437,24 +513,339 @@ class HB_OT_facial_clear(Operator):
         return get_active_armature(context) is not None
 
     def execute(self, context):
+        props = context.scene.hb_facial
         arm = get_active_armature(context)
-        names = _tagged(arm, GEN_PROP)
+        err = _check_mesh(props)
+        if err:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+        mesh = props.mesh
+        slots = [s for s in SETS if s in edge_map(mesh)]
+        if not slots:
+            self.report({'WARNING'}, "Register at least one loop first")
+            return {'CANCELLED'}
+
+        try:
+            infos = {s: analyze_slot(arm, mesh, s) for s in slots}
+        except ValueError as e:
+            self.report({'ERROR'}, str(e))
+            return {'CANCELLED'}
+
+        inv = arm.matrix_world.inverted()
+        made = []
+        base = set(_tagged(arm, 'BASE'))
         with _EditMode(context, arm) as ebs:
-            _remove_bones(ebs, names)
-        self.report({'INFO'}, f"Removed {len(names)} generated bones")
+            for slot, info in infos.items():
+                for role in ROLES:
+                    name = SETS[slot]["guides"][role]
+                    if name in ebs:
+                        continue
+                    b = ebs.new(name)
+                    b.head = inv @ info["guides"][role]
+                    b.tail = b.head + Vector((0.0, 0.0, GUIDE_LEN * (3 if role == "pivot" else 1)))
+                    b.roll = 0.0
+                    b.use_deform = False
+                    _set_only_coll(arm, b, GUIDE_COLL)
+                    made.append((name, role, slot))
+        for name, role, slot in made:
+            arm.data.bones[name][ROLE_PROP] = role
+        _tag(arm, [m[0] for m in made], 'GUIDE')
+        for name, _r, slot in made:
+            arm.data.bones[name][SET_PROP] = slot
+
+        # Refit eye / mouth masters from the (possibly edited) guides.
+        refit = {}
+        for slot in slots:
+            g = SETS[slot]["guides"]
+            if slot == 'LIPS':
+                refit[T.MOUTH_MASTER] = (_world(arm, g["upp"]) + _world(arm, g["low"])) * 0.5
+            else:
+                refit[T.EYE_MASTER.format(side=SETS[slot]["side"])] = _world(arm, g["pivot"])
+        refit = {k: v for k, v in refit.items() if k in base}
+        if refit:
+            with _EditMode(context, arm) as ebs:
+                for name, p in refit.items():
+                    b = ebs[name]
+                    vec = b.tail - b.head
+                    b.head = inv @ p
+                    b.tail = b.head + vec
+
+        msg = f"Added {len(made)} guides"
+        if refit:
+            msg += f", refit {', '.join(refit)}"
+        if 'LIPS' in slots:
+            info, upp, low = slot_lines(arm, mesh, 'LIPS', props)
+            count = _build_ribbon(context, arm, upp, low, _world(arm, SETS['LIPS']['guides']['pivot']))
+            msg += f", ribbon + {count} HK- empties"
+        self.report({'INFO'}, msg)
         return {'FINISHED'}
 
 
 # ----------------------------------------------------------------------
-# DSP
+# 2. MCH
+# ----------------------------------------------------------------------
+def _parent_for(arm_bones, slot, name, spec, fallback):
+    if slot == 'LIPS':
+        if name in spec["corners"]:
+            want = T.JAW_HALF
+        elif "_low" in name:
+            want = T.LIP_LOWER_PARENT
+        else:
+            want = T.LIP_UPPER_PARENT
+    else:
+        want = T.EYE_MASTER.format(side=spec["side"])
+    if want in arm_bones:
+        return want
+    return fallback if fallback in arm_bones else None
+
+
+class HB_OT_facial_build_mch(Operator):
+    """Build the MCH bones (pivot -> each point) with parents and constraints.
+Re-running replaces the MCH and DEF bones this tool made"""
+
+    bl_idname = "hb.facial_build_mch"
+    bl_label = "Build MCH"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_active_armature(context) is not None
+
+    def execute(self, context):
+        props = context.scene.hb_facial
+        arm = get_active_armature(context)
+        err = _check_mesh(props)
+        if err:
+            self.report({'ERROR'}, err)
+            return {'CANCELLED'}
+        mesh = props.mesh
+        plans, notes = {}, []
+        for slot, spec in SETS.items():
+            if slot not in edge_map(mesh):
+                continue
+            if any(spec["guides"][r] not in arm.data.bones for r in ROLES):
+                notes.append(f"{slot}: run Generate Guides first")
+                continue
+            try:
+                _info, upp, low = slot_lines(arm, mesh, slot, props)
+            except ValueError as e:
+                notes.append(str(e))
+                continue
+            seen, points = set(), []
+            for nm, p in upp + low:
+                if nm not in seen:
+                    seen.add(nm)
+                    points.append((nm, p))
+            plans[slot] = (points, _world(arm, spec["guides"]["pivot"]))
+        if not plans:
+            self.report({'WARNING'}, "; ".join(notes) or "Nothing to build")
+            return {'CANCELLED'}
+
+        inv = arm.matrix_world.inverted()
+        old = {s: set(_tagged(arm, 'MCH', s)) | set(_tagged(arm, 'DEF', s)) for s in plans}
+        bones = arm.data.bones
+        built, skipped = {}, []
+        need_jaw_half = 'LIPS' in plans and T.JAW_BONE in bones
+        with _EditMode(context, arm) as ebs:
+            for slot in plans:
+                _remove_bones(ebs, old[slot])
+            if need_jaw_half:
+                _remove_bones(ebs, [T.JAW_HALF])
+                jaw = ebs[T.JAW_BONE]
+                h = ebs.new(T.JAW_HALF)
+                h.head, h.tail, h.roll = jaw.head.copy(), jaw.tail.copy(), jaw.roll
+                h.parent = jaw.parent
+                h.use_deform = False
+                _set_only_coll(arm, h, T.COLL_MCH)
+            names = set(ebs.keys())
+            for slot, (points, pivot) in plans.items():
+                spec = SETS[slot]
+                clash = [n for n, _p in points if "MCH-" + n in names or "DEF-" + n in names]
+                if clash:
+                    skipped.append((slot, clash[0], len(clash)))
+                    continue
+                built[slot] = []
+                for nm, p in points:
+                    m = ebs.new("MCH-" + nm)
+                    m.head, m.tail, m.roll = inv @ pivot, inv @ p, 0.0
+                    par = _parent_for(ebs, slot, nm, spec, props.parent_bone)
+                    m.parent = ebs[par] if par else None
+                    m.use_deform = False
+                    _set_only_coll(arm, m, T.COLL_MCH)
+                    built[slot].append(m.name)
+
+        if need_jaw_half:
+            _tag(arm, [T.JAW_HALF], 'MCH', 'LIPS')
+            c = arm.pose.bones[T.JAW_HALF].constraints.new('COPY_TRANSFORMS')
+            c.name = "Follow_Jaw_50"
+            c.target, c.subtarget = arm, T.JAW_BONE
+            c.owner_space = c.target_space = 'LOCAL'
+            c.influence = 0.5
+        hooks_missing = 0
+        for slot, names in built.items():
+            _tag(arm, names, 'MCH', slot)
+            if slot != 'LIPS':
+                continue
+            for n in names:
+                hook = bpy.data.objects.get(HOOK_PREFIX + n[len("MCH-"):])
+                if hook is None:
+                    hooks_missing += 1
+                    continue
+                c = arm.pose.bones[n].constraints.new('STRETCH_TO')
+                c.name = "Stretch_HK"
+                c.target = hook
+                c.volume = 'NO_VOLUME'
+                c.rest_length = arm.data.bones[n].length
+
+        msg = f"Built MCH: " + ", ".join(f"{s} {len(n)}" for s, n in built.items())
+        for slot, first, count in skipped:
+            msg += f"; {slot} skipped ({count} names used by hand-made bones, e.g. {first})"
+        if hooks_missing:
+            msg += f"; {hooks_missing} lip MCH without HK- empty (run Generate Guides)"
+        if notes:
+            msg += "; " + "; ".join(notes)
+        self.report({'WARNING'} if (skipped or hooks_missing or notes) else {'INFO'}, msg)
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------------
+# 3. Build All (DEF + DSP)
 # ----------------------------------------------------------------------
 def dsp_map(mesh_obj):
-    data = mesh_obj.get(DSP_KEY)
+    data = mesh_obj.get(DSP_KEY) if mesh_obj else None
     return {k: int(v) for k, v in data.items()} if data else {}
 
 
-def _write_dsp_map(mesh_obj, mapping):
-    mesh_obj[DSP_KEY] = mapping
+def build_def(context, arm, def_length):
+    """DEF bone on the tail of every generated MCH point bone."""
+    mch = [n for n in _tagged(arm, 'MCH') if n != T.JAW_HALF]
+    old = _tagged(arm, 'DEF')
+    sets = {n: arm.data.bones[n].get(SET_PROP) for n in mch}
+    made = []
+    with _EditMode(context, arm) as ebs:
+        _remove_bones(ebs, old)
+        for n in mch:
+            name = "DEF-" + n[len("MCH-"):]
+            if name in ebs:
+                continue
+            m = ebs[n]
+            d = ebs.new(name)
+            d.head = m.tail.copy()
+            d.tail = d.head + Vector((0.0, 0.0, def_length))
+            d.roll = 0.0
+            d.parent = m
+            d.use_deform = True
+            _set_only_coll(arm, d, T.COLL_DEF)
+            made.append((name, sets[n]))
+    for name, s in made:
+        _tag(arm, [name], 'DEF', s)
+    return len(made), len(old)
+
+
+def build_dsp(context, arm, mesh, length, fallback_parent):
+    """One-vertex group + DSP bone (Copy Location) per stored control."""
+    mapping = dsp_map(mesh)
+    nverts = len(mesh.data.vertices)
+    todo = {c: v for c, v in mapping.items() if c in arm.data.bones and 0 <= v < nverts}
+    missing = sorted(set(mapping) - set(todo))
+    old = [b.name for b in arm.data.bones if DSP_PROP in b]
+    # A DSP bone lives under the control's own parent so it follows the
+    # same face region before Copy Location takes over.
+    parents = {c: (arm.data.bones[c].parent.name if arm.data.bones[c].parent
+                   else fallback_parent) for c in todo}
+    inv = arm.matrix_world.inverted()
+    mw = mesh.matrix_world
+    built, blocked = [], []
+    with _EditMode(context, arm) as ebs:
+        _remove_bones(ebs, old)
+        for ctrl, vi in todo.items():
+            name = DSP_PREFIX + ctrl
+            if name in ebs:
+                blocked.append(name)
+                continue
+            b = ebs.new(name)
+            b.head = inv @ (mw @ mesh.data.vertices[vi].co)
+            b.tail = b.head + Vector((0.0, 0.0, length))
+            b.roll = 0.0
+            par = parents[ctrl]
+            b.parent = ebs.get(par) if par else None
+            b.use_deform = False
+            _set_only_coll(arm, b, DSP_COLL)
+            built.append((name, ctrl, vi))
+    for name, ctrl, vi in built:
+        vg = mesh.vertex_groups.get(name)
+        if vg is not None:
+            mesh.vertex_groups.remove(vg)
+        mesh.vertex_groups.new(name=name).add([vi], 1.0, 'REPLACE')
+        arm.data.bones[name][DSP_PROP] = 1
+        pb = arm.pose.bones[name]
+        con = pb.constraints.new('COPY_LOCATION')
+        con.name = "HB_DSP"
+        con.target, con.subtarget = mesh, name
+        arm.pose.bones[ctrl].custom_shape_transform = pb
+    return len(built), len(old), missing, blocked
+
+
+class HB_OT_facial_build_all(Operator):
+    """Build the DEF bones on every generated MCH, then the DSP bones for every
+stored control. Re-running replaces only what this tool made"""
+
+    bl_idname = "hb.facial_build_all"
+    bl_label = "Build All"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return get_active_armature(context) is not None
+
+    def execute(self, context):
+        props = context.scene.hb_facial
+        arm = get_active_armature(context)
+        if not _tagged(arm, 'MCH'):
+            self.report({'WARNING'}, "Run Build MCH first")
+            return {'CANCELLED'}
+        made, replaced = build_def(context, arm, props.def_length)
+        msg = f"DEF {made} (replaced {replaced})"
+        level = {'INFO'}
+        if props.mesh is not None and dsp_map(props.mesh):
+            n, old, missing, blocked = build_dsp(context, arm, props.mesh,
+                                                 props.def_length, props.parent_bone)
+            msg += f", DSP {n} (replaced {old})"
+            if missing:
+                msg += f"; {len(missing)} stored controls not found (e.g. {missing[0]})"
+                level = {'WARNING'}
+            if blocked:
+                msg += f"; {len(blocked)} DSP names used by hand-made bones"
+                level = {'WARNING'}
+        self.report(level, msg)
+        return {'FINISHED'}
+
+
+class HB_OT_facial_dsp_build(Operator):
+    """Build only the DSP bones for every stored control"""
+
+    bl_idname = "hb.facial_dsp_build"
+    bl_label = "Build DSP"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        props = context.scene.hb_facial
+        return (get_active_armature(context) is not None
+                and props.mesh is not None and DSP_KEY in props.mesh)
+
+    def execute(self, context):
+        props = context.scene.hb_facial
+        arm = get_active_armature(context)
+        n, old, missing, blocked = build_dsp(context, arm, props.mesh,
+                                             props.def_length, props.parent_bone)
+        msg = f"Built {n} DSP bones (replaced {old})"
+        if missing:
+            msg += f"; {len(missing)} stored controls not found (e.g. {missing[0]})"
+        if blocked:
+            msg += f"; {len(blocked)} skipped, name used by a hand-made bone"
+        self.report({'WARNING'} if (missing or blocked) else {'INFO'}, msg)
+        return {'FINISHED'}
 
 
 class HB_OT_facial_dsp_store(Operator):
@@ -483,7 +874,7 @@ class HB_OT_facial_dsp_store(Operator):
             active = sel[0]
         mapping = dsp_map(obj)
         mapping[props.dsp_control] = active.index
-        _write_dsp_map(obj, mapping)
+        obj[DSP_KEY] = mapping
         self.report({'INFO'}, f"{props.dsp_control} -> vertex {active.index}")
         return {'FINISHED'}
 
@@ -502,6 +893,7 @@ class HB_OT_facial_dsp_store_nearest(Operator):
                 and context.scene.hb_facial.mesh is not None)
 
     def execute(self, context):
+        from mathutils import kdtree
         props = context.scene.hb_facial
         arm = get_active_armature(context)
         bones = [pb for pb in (context.selected_pose_bones or [])
@@ -509,108 +901,17 @@ class HB_OT_facial_dsp_store_nearest(Operator):
         if not bones:
             self.report({'WARNING'}, "Select control bones")
             return {'CANCELLED'}
-        graph = MeshGraph(props.mesh)
-        mapping = dsp_map(props.mesh)
-        for pb in bones:
-            mapping[pb.name] = graph.nearest(_world(arm, pb.name))
-        _write_dsp_map(props.mesh, mapping)
-        self.report({'INFO'}, f"Stored {len(bones)} controls on {props.mesh.name}")
-        return {'FINISHED'}
-
-
-class HB_OT_facial_dsp_build(Operator):
-    """Create a one-vertex group, a DSP bone (Copy Location to it) and the
-custom shape transform for every stored control. Re-running replaces them"""
-
-    bl_idname = "hb.facial_dsp_build"
-    bl_label = "Build DSP"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        props = context.scene.hb_facial
-        return (get_active_armature(context) is not None
-                and props.mesh is not None and DSP_KEY in props.mesh)
-
-    def execute(self, context):
-        props = context.scene.hb_facial
-        arm = get_active_armature(context)
         mesh = props.mesh
-        mapping = dsp_map(mesh)
-        nverts = len(mesh.data.vertices)
-        todo = {c: v for c, v in mapping.items()
-                if c in arm.data.bones and 0 <= v < nverts}
-        missing = sorted(set(mapping) - set(todo))
-
-        old = _tagged(arm, DSP_PROP)
-        inv = arm.matrix_world.inverted()
         mw = mesh.matrix_world
-        built, blocked = [], []
-        with _EditMode(context, arm) as ebs:
-            _remove_bones(ebs, old)
-            parent = ebs.get(props.parent_bone) if props.parent_bone else None
-            for ctrl, vi in todo.items():
-                name = DSP_PREFIX + ctrl
-                if name in ebs:
-                    blocked.append(name)
-                    continue
-                b = ebs.new(name)
-                b.head = inv @ (mw @ mesh.data.vertices[vi].co)
-                b.tail = b.head + Vector((0.0, 0.0, props.def_length))
-                b.roll = 0.0
-                b.parent = parent
-                b.use_deform = False
-                _set_only_coll(arm, b, DSP_COLL)
-                built.append((name, ctrl, vi))
-
-        for name, ctrl, vi in built:
-            vg = mesh.vertex_groups.get(name)
-            if vg is not None:
-                mesh.vertex_groups.remove(vg)
-            mesh.vertex_groups.new(name=name).add([vi], 1.0, 'REPLACE')
-            arm.data.bones[name][DSP_PROP] = 1
-            pb = arm.pose.bones[name]
-            con = pb.constraints.new('COPY_LOCATION')
-            con.name = "HB_DSP"
-            con.target = mesh
-            con.subtarget = name
-            arm.pose.bones[ctrl].custom_shape_transform = pb
-
-        msg = f"Built {len(built)} DSP bones (replaced {len(old)})"
-        if missing:
-            msg += f"; {len(missing)} stored controls not found (e.g. {missing[0]})"
-        if blocked:
-            msg += f"; {len(blocked)} skipped, name used by a hand-made bone"
-        self.report({'WARNING'} if (missing or blocked) else {'INFO'}, msg)
-        return {'FINISHED'}
-
-
-class HB_OT_facial_dsp_clear(Operator):
-    """Delete the generated DSP bones and their vertex groups. Stored vertices are kept"""
-
-    bl_idname = "hb.facial_dsp_clear"
-    bl_label = "Clear DSP"
-    bl_options = {'REGISTER', 'UNDO'}
-
-    @classmethod
-    def poll(cls, context):
-        return get_active_armature(context) is not None
-
-    def execute(self, context):
-        props = context.scene.hb_facial
-        arm = get_active_armature(context)
-        names = _tagged(arm, DSP_PROP)
-        for pb in arm.pose.bones:
-            if pb.custom_shape_transform and pb.custom_shape_transform.name in names:
-                pb.custom_shape_transform = None
-        with _EditMode(context, arm) as ebs:
-            _remove_bones(ebs, names)
-        if props.mesh is not None:
-            for n in names:
-                vg = props.mesh.vertex_groups.get(n)
-                if vg is not None:
-                    props.mesh.vertex_groups.remove(vg)
-        self.report({'INFO'}, f"Removed {len(names)} DSP bones")
+        kd = kdtree.KDTree(len(mesh.data.vertices))
+        for v in mesh.data.vertices:
+            kd.insert(mw @ v.co, v.index)
+        kd.balance()
+        mapping = dsp_map(mesh)
+        for pb in bones:
+            mapping[pb.name] = kd.find(_world(arm, pb.name))[1]
+        mesh[DSP_KEY] = mapping
+        self.report({'INFO'}, f"Stored {len(bones)} controls on {mesh.name}")
         return {'FINISHED'}
 
 
@@ -632,21 +933,72 @@ class HB_OT_facial_dsp_forget(Operator):
         if mapping.pop(props.dsp_control, None) is None:
             self.report({'WARNING'}, f"{props.dsp_control} is not stored")
             return {'CANCELLED'}
-        _write_dsp_map(props.mesh, mapping)
-        self.report({'INFO'}, f"Forgot {props.dsp_control}")
+        props.mesh[DSP_KEY] = mapping
+        return {'FINISHED'}
+
+
+# ----------------------------------------------------------------------
+# Clear
+# ----------------------------------------------------------------------
+CLEAR_ITEMS = [
+    ('BASE', "Base", "Base face bones"),
+    ('GUIDE', "Guides", "Guide bones, lip ribbon and HK- empties"),
+    ('MCH', "MCH", "Generated MCH bones (and the DEF bones on them)"),
+    ('DEF', "DEF + DSP", "Generated DEF and DSP bones and the DSP vertex groups"),
+]
+
+
+class HB_OT_facial_clear(Operator):
+    """Delete what one step generated. Hand-made bones are never touched"""
+
+    bl_idname = "hb.facial_clear"
+    bl_label = "Clear"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    stage: EnumProperty(items=CLEAR_ITEMS)
+
+    @classmethod
+    def poll(cls, context):
+        return get_active_armature(context) is not None
+
+    def execute(self, context):
+        props = context.scene.hb_facial
+        arm = get_active_armature(context)
+        names = set(_tagged(arm, self.stage))
+        if self.stage == 'MCH':
+            names |= set(_tagged(arm, 'DEF'))
+        dsp = []
+        if self.stage == 'DEF':
+            dsp = [b.name for b in arm.data.bones if DSP_PROP in b]
+            for pb in arm.pose.bones:
+                if pb.custom_shape_transform and pb.custom_shape_transform.name in dsp:
+                    pb.custom_shape_transform = None
+            names |= set(dsp)
+        with _EditMode(context, arm) as ebs:
+            _remove_bones(ebs, names)
+        if self.stage == 'GUIDE':
+            _remove_objects({"LIPS_RIBBON", "LIPS_HOOK"})
+        if dsp and props.mesh is not None:
+            for n in dsp:
+                vg = props.mesh.vertex_groups.get(n)
+                if vg is not None:
+                    props.mesh.vertex_groups.remove(vg)
+        self.report({'INFO'}, f"Removed {len(names)} bones")
         return {'FINISHED'}
 
 
 _classes = (
-    HB_OT_facial_add_guides,
-    HB_OT_facial_mirror_guides,
-    HB_OT_facial_build,
-    HB_OT_facial_clear,
+    HB_OT_facial_build_base,
+    HB_OT_facial_register_edges,
+    HB_OT_facial_clear_edges,
+    HB_OT_facial_generate,
+    HB_OT_facial_build_mch,
+    HB_OT_facial_build_all,
+    HB_OT_facial_dsp_build,
     HB_OT_facial_dsp_store,
     HB_OT_facial_dsp_store_nearest,
-    HB_OT_facial_dsp_build,
-    HB_OT_facial_dsp_clear,
     HB_OT_facial_dsp_forget,
+    HB_OT_facial_clear,
 )
 
 

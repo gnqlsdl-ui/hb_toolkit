@@ -1,17 +1,9 @@
 """Properties for the facial edge-bone / DSP generator (``scene.hb_facial``)."""
 
 import bpy
-from bpy.props import (BoolProperty, EnumProperty, FloatProperty, IntProperty,
+from bpy.props import (EnumProperty, FloatProperty, IntProperty,
                        PointerProperty, StringProperty)
 from bpy.types import PropertyGroup
-
-
-# Guide sets the panel can stamp. id -> label.
-GUIDE_SET_ITEMS = [
-    ('LIPS', "Lips", "Lip corners, upper/lower center and pivot"),
-    ('LID_L', "Eyelid .L", "Left eyelid corners, upper/lower and pivot"),
-    ('LID_R', "Eyelid .R", "Right eyelid corners, upper/lower and pivot"),
-]
 
 
 def _poll_mesh(_self, obj):
@@ -26,11 +18,12 @@ class HB_FacialProps(PropertyGroup):
         poll=_poll_mesh,
     )
 
-    guide_set: EnumProperty(
-        name="Guide Set",
-        description="Which guide set to add",
-        items=GUIDE_SET_ITEMS,
-        default='LIPS',
+    head_bone: StringProperty(
+        name="Head",
+        description="Head bone the base face bones are built under. It should "
+        "run from the base of the head to the top: the base layout is scaled "
+        "to its length",
+        default="",
     )
 
     count_mode: EnumProperty(
@@ -58,17 +51,10 @@ class HB_FacialProps(PropertyGroup):
         default=9, min=1, soft_max=30,
     )
 
-    make_mch: BoolProperty(
-        name="MCH From Pivot",
-        description="Create an MCH bone from the pivot guide to each point "
-        "and parent the DEF bone to its tail",
-        default=True,
-    )
-
     parent_bone: StringProperty(
-        name="Parent",
-        description="Parent for generated MCH (or DEF) bones and DSP bones. "
-        "Empty: no parent",
+        name="Fallback Parent",
+        description="Parent for MCH / DSP bones when the base bone they "
+        "belong under (MCH_SKULL, MCH-JAW, MSTR-EYE) does not exist",
         default="",
     )
 
